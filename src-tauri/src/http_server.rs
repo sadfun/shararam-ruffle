@@ -914,6 +914,12 @@ mod tests {
         assert!(app.contains(r#"window.addEventListener("resize", fitPlayerToStage)"#));
         assert!(!app.contains(r#"player.style.width = "100%""#));
 
+        // The strips beside the stage continue the movie's own background,
+        // sampled from the rendered frame rather than hardcoded to a colour.
+        assert!(app.contains("function paintGutters()"));
+        assert!(app.contains("getImageData"));
+        assert!(app.contains("window.OnUserEnterLocation = () => repaintGutters()"));
+
         let config = WebAssets::get("ruffle-config.js").unwrap();
         let config = std::str::from_utf8(&config.data).unwrap();
         assert!(config.contains("letterbox: \"on\""));
