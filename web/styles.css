@@ -1,7 +1,7 @@
-:root { color-scheme: light; font-family: "Trebuchet MS", Tahoma, Verdana, sans-serif; background: #5fc5eb; color: #24506a; }
+:root { color-scheme: light; font-family: "Trebuchet MS", Tahoma, Verdana, sans-serif; background: #def1f5; color: #24506a; }
 * { box-sizing: border-box; }
 html, body, #app, #game-shell, #game { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-body { background: linear-gradient(#b5e7f9, #5fc5eb 60%, #45b3de); }
+body { background: #def1f5; }
 .card { width: min(340px, calc(100% - 32px)); margin: 16vh auto 0; padding: 24px; border-radius: 14px; background: #fff; box-shadow: 0 6px 0 rgba(21,86,115,.15); }
 .card h1 { margin: 0 0 14px; font-size: 26px; text-align: center; color: #ee8022; }
 label { display: grid; gap: 5px; margin: 12px 0; font-weight: bold; font-size: 14px; }
@@ -26,6 +26,7 @@ button:disabled { opacity: .6; cursor: wait; }
    in app.js, so Ruffle never has a letterbox area of its own (it paints those
    bars black inside its canvas) and the page gradient shows around the game.
    These values are only the pre-script fallback. */
+#game-shell { background: #def1f5 url("/shgrd.png") center / 100% 100% no-repeat; }
 #game { display: grid; place-items: center; }
 ruffle-player { display: block; width: 100%; height: 100%; }
 #debug-state { position: fixed; z-index: 20; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 7px 10px; border-radius: 7px; background: #061b25d9; color: #9ff0a8; font: 12px/1.35 Consolas, monospace; overflow-wrap: anywhere; pointer-events: none; }

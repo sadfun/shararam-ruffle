@@ -48,83 +48,6 @@
   window.addEventListener("resize", fitPlayerToStage);
   new ResizeObserver(fitPlayerToStage).observe(document.getElementById("game"));
 
-  // Every location paints its own background, so the strips beside the stage
-  // are built from the movie's own edge pixels instead of a fixed colour. They
-  // then continue whatever the current screen shows.
-  const GUTTER_STEPS = 16;
-  let gutterProbe = null;
-  let gutterUnavailable = false;
-
-  function edgeColors(canvas, sideEdges, atEnd) {
-    if (!gutterProbe) {
-      gutterProbe = document
-        .createElement("canvas")
-        .getContext("2d", { willReadFrequently: true });
-    }
-    const width = sideEdges ? 1 : GUTTER_STEPS;
-    const height = sideEdges ? GUTTER_STEPS : 1;
-    gutterProbe.canvas.width = width;
-    gutterProbe.canvas.height = height;
-    const band = Math.max(2, Math.round((sideEdges ? canvas.width : canvas.height) / 100));
-    gutterProbe.drawImage(
-      canvas,
-      sideEdges && atEnd ? canvas.width - band : 0,
-      !sideEdges && atEnd ? canvas.height - band : 0,
-      sideEdges ? band : canvas.width,
-      sideEdges ? canvas.height : band,
-      0, 0, width, height,
-    );
-    const data = gutterProbe.getImageData(0, 0, width, height).data;
-    const colors = [];
-    for (let step = 0; step < GUTTER_STEPS; step++) {
-      const offset = step * 4;
-      // A fully transparent read means the frame was not available to us.
-      if (data[offset + 3] === 0) return null;
-      colors.push(`rgb(${data[offset]},${data[offset + 1]},${data[offset + 2]})`);
-    }
-    return colors;
-  }
-
-  function edgeGradient(colors, direction) {
-    const stops = colors.map(
-      (color, index) => `${color} ${((index * 100) / (colors.length - 1)).toFixed(1)}%`,
-    );
-    return `linear-gradient(${direction}, ${stops.join(", ")})`;
-  }
-
-  function paintGutters() {
-    if (gutterUnavailable || !player) return;
-    const canvas = player.shadowRoot?.querySelector("canvas");
-    if (!canvas?.width) return;
-    const box = document.getElementById("game").getBoundingClientRect();
-    const stage = player.getBoundingClientRect();
-    const sideEdges = box.width - stage.width > 1;
-    if (!sideEdges && box.height - stage.height <= 1) {
-      gameShell.style.backgroundImage = "";
-      return;
-    }
-    const near = edgeColors(canvas, sideEdges, false);
-    const far = edgeColors(canvas, sideEdges, true);
-    if (!near || !far) {
-      // Keep the page gradient rather than retrying against a blank frame.
-      gutterUnavailable = true;
-      return;
-    }
-    const direction = sideEdges ? "to bottom" : "to right";
-    gameShell.style.backgroundImage = `${edgeGradient(near, direction)}, ${edgeGradient(far, direction)}`;
-    gameShell.style.backgroundPosition = sideEdges
-      ? "left top, right top"
-      : "left top, left bottom";
-    gameShell.style.backgroundSize = sideEdges ? "50% 100%, 50% 100%" : "100% 50%, 100% 50%";
-    gameShell.style.backgroundRepeat = "no-repeat";
-  }
-  // Reading pixels back from the renderer costs a few milliseconds, so it is
-  // driven by the movie's own location callbacks below. This slow poll only
-  // covers the screens that change without announcing it.
-  window.setInterval(() => {
-    if (!document.hidden) paintGutters();
-  }, 5000);
-
   // Ruffle falls back to a software renderer when the browser has hardware
   // acceleration switched off, which costs exactly the performance this client
   // exists for. Stay silent unless the renderer is known to be software.
@@ -180,7 +103,6 @@
       unmuteOverlay: "hidden",
     });
     ruffleState.mounted = true;
-    paintGutters();
   }
 
   if (debugMode) {
@@ -259,14 +181,10 @@
   if (!capability) { login.hidden = true; fatal.hidden = false; fatalText.textContent = "Запустите приложение через shararam-live-client."; }
   else api("/api/status").then(result => { if (result.authenticated) startGame(); }).catch(() => {});
 
-  // The movie calls these on its own screen and location changes; each one is
-  // a moment where the background behind the stage may have changed. The frame
-  // is sampled a beat later so the new screen is already drawn.
-  const repaintGutters = () => window.setTimeout(paintGutters, 400);
-  window.OnLoad = () => { loading.hidden = true; repaintGutters(); };
-  window.OnGameEnter = () => repaintGutters();
+  window.OnLoad = () => { loading.hidden = true; };
+  window.OnGameEnter = () => {};
   window.flashSetServerName = () => {};
-  window.OnUserEnterLocation = () => repaintGutters();
+  window.OnUserEnterLocation = () => {};
   window.ReconnectDisable = () => player?.ReconnectDisable?.();
   window.addEventListener("beforeunload", () => window.ReconnectDisable());
   window.SaveAvatar = payload => fetch("/official/s/UserAvatarSaver", {

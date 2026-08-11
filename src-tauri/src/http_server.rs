@@ -914,11 +914,13 @@ mod tests {
         assert!(app.contains(r#"window.addEventListener("resize", fitPlayerToStage)"#));
         assert!(!app.contains(r#"player.style.width = "100%""#));
 
-        // The strips beside the stage continue the movie's own background,
-        // sampled from the rendered frame rather than hardcoded to a colour.
-        assert!(app.contains("function paintGutters()"));
-        assert!(app.contains("getImageData"));
-        assert!(app.contains("window.OnUserEnterLocation = () => repaintGutters()"));
+        // Match the official page: its 1px-wide shgrd.png is stretched behind
+        // the Flash stage, rather than deriving a background from game pixels.
+        assert!(!app.contains("getImageData"));
+        let styles = WebAssets::get("styles.css").unwrap();
+        let styles = std::str::from_utf8(&styles.data).unwrap();
+        assert!(styles.contains("url(\"/shgrd.png\") center / 100% 100% no-repeat"));
+        assert!(WebAssets::get("shgrd.png").is_some());
 
         let config = WebAssets::get("ruffle-config.js").unwrap();
         let config = std::str::from_utf8(&config.data).unwrap();
