@@ -884,6 +884,40 @@ mod tests {
     }
 
     #[test]
+    fn the_stage_fills_the_player_so_no_letterbox_bars_cover_the_page_gradient() {
+        let styles = WebAssets::get("styles.css").unwrap();
+        let styles = std::str::from_utf8(&styles.data).unwrap();
+        // 815x495 is the stage of the official base.swf.
+        assert!(styles.contains("aspect-ratio: 815 / 495"));
+        assert!(!styles.contains("ruffle-player { display: block; width: 100%; height: 100%; }"));
+
+        let config = WebAssets::get("ruffle-config.js").unwrap();
+        let config = std::str::from_utf8(&config.data).unwrap();
+        assert!(config.contains("letterbox: \"on\""));
+    }
+
+    #[test]
+    fn hosted_visitors_are_pointed_at_the_desktop_build() {
+        let index = WebAssets::get("index.html").unwrap();
+        let index = std::str::from_utf8(&index.data).unwrap();
+        assert!(index.contains("https://github.com/sadfun/shararam-ruffle"));
+        assert!(index.contains(r#"id="hosted-note""#));
+        assert!(index.contains("<title>Шарарам Ruffle</title>"));
+
+        let app = WebAssets::get("app.js").unwrap();
+        let app = std::str::from_utf8(&app.data).unwrap();
+        // The note must stay hidden for the desktop and local-server builds.
+        assert!(
+            app.contains(
+                r#"["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname)"#
+            )
+        );
+        assert!(
+            app.contains(r#"if (!loopback) document.getElementById("hosted-note").hidden = false"#)
+        );
+    }
+
+    #[test]
     fn native_shared_object_path_preserves_the_flash_origin_namespace() {
         let root = PathBuf::from("profile").join("random-flash-id");
         assert_eq!(

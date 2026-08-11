@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="shararam-cap" content="__SHARARAM_CAP__">
-  <title>Шарарам</title>
+  <title>Шарарам Ruffle</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/ruffle-config.js"></script>
   <script src="/ruffle/ruffle.js"></script>
@@ -13,14 +13,15 @@
 <body>
   <main id="app">
     <section id="login" class="card">
-      <h1>Шарарам</h1>
+      <h1>Шарарам Ruffle</h1>
       <form id="login-form">
         <label>Логин<input id="login-name" name="login" autocomplete="username" required></label>
         <label>Пароль<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
         <button type="submit">Войти</button>
       </form>
       <p id="login-error" class="error" role="alert"></p>
-      <p class="note">Неофициальный клиент Шарарама на Ruffle</p>
+      <p id="hosted-note" class="note" hidden>Для лучшей безопасности и скорости <a href="https://github.com/sadfun/shararam-ruffle/releases" target="_blank" rel="noopener">скачайте десктопное приложение</a></p>
+      <p class="note">Неофициальный клиент Шарарама на Ruffle · <a href="https://github.com/sadfun/shararam-ruffle" target="_blank" rel="noopener">GitHub</a></p>
     </section>
     <section id="game-shell" hidden>
       <div id="game"></div>

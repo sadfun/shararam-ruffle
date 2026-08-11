@@ -21,6 +21,12 @@
   const fatal = document.getElementById("fatal");
   const fatalText = document.getElementById("fatal-text");
   const debugState = document.getElementById("debug-state");
+
+  // On a shared server the password travels through that server; the desktop
+  // build talks to shararam.ru directly. Point hosted visitors at it.
+  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+  if (!loopback) document.getElementById("hosted-note").hidden = false;
+
   let serverDiagnostics = {};
   let player = null;
   const ruffleState = { mounted: false, sharedObjectImported: false };

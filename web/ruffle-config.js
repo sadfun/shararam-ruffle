@@ -12,7 +12,8 @@ window.RufflePlayer.config = {
   polyfills: false,
   scale: "showAll",
   forceScale: true,
-  letterbox: "fullscreen",
+  // Clip to the stage: without this the movie paints outside its own bounds.
+  letterbox: "on",
   urlRewriteRules: [[/^https:\/\/www\.shararam\.ru\//i, `${location.origin}/official/`]],
   logLevel: new URLSearchParams(location.search).get("debug") === "1" ? "debug" : "warn"
 };
