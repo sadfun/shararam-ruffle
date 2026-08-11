@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="shararam-cap" content="__SHARARAM_CAP__">
+  <title>Шарарам</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/ruffle-config.js"></script>
+  <script src="/ruffle/ruffle.js"></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main id="app">
+    <section id="login" class="card">
+      <h1>Шарарам</h1>
+      <form id="login-form">
+        <label>Логин<input id="login-name" name="login" autocomplete="username" required></label>
+        <label>Пароль<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">Войти</button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="note">Неофициальный клиент Шарарама на Ruffle</p>
+    </section>
+    <section id="game-shell" hidden>
+      <div id="game"></div>
+      <div id="loading">Загружаем Шарарам…</div>
+    </section>
+    <section id="fatal" class="card" hidden><h1>Не удалось запустить клиент</h1><p id="fatal-text"></p></section>
+    <output id="debug-state" hidden></output>
+  </main>
+</body>
+</html>

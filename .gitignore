@@ -1,0 +1,9 @@
+/src-tauri/target/
+/src-tauri/gen/
+/node_modules/
+/dist/
+/.idea/
+/.vscode/
+*.log
+.DS_Store
+*.profraw

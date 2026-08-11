@@ -1,0 +1,51 @@
+[package]
+name = "shararam-live-client"
+version = "0.2.0"
+description = "A live Ruffle client for the official Shararam service"
+authors = ["Shararam preservation project"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sadfun/shararam-ruffle"
+build = "build.rs"
+
+[lib]
+name = "shararam_live_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shararam-live-client"
+path = "src/main.rs"
+
+[features]
+default = []
+desktop = ["dep:tauri"]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["json", "ws"] }
+futures-util = "0.3"
+hex = "0.4"
+md5 = "0.7"
+mime_guess = "2"
+rand = "0.9"
+regex = "1"
+wreq-transport = { package = "wreq", version = "6.0.0-rc.29", default-features = false, features = ["brotli", "cookies", "deflate", "gzip", "json", "stream", "tokio-rt", "webpki-roots", "zstd"] }
+brotli = "8"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", optional = true }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+webbrowser = "1"
+
+[build-dependencies]
+tauri-build = "2"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,6 @@
+{
+  "identifier": "main-window",
+  "description": "The live client does not expose Tauri commands to the webview.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

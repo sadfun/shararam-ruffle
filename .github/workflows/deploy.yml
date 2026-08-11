@@ -1,0 +1,109 @@
+name: Deploy public server
+
+# Builds the loopback companion in server-only mode and ships it to the host
+# that serves shararam.sadfun.dev behind Caddy. Runs on every push to main and
+# can be triggered by hand for the first deploy or a rollback.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "LICENSE"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-public
+  cancel-in-progress: false
+
+env:
+  DEPLOY_HOST: 94.103.89.17
+  DEPLOY_USER: shararam
+  REMOTE_DIR: /opt/shararam
+  BINARY: shararam-live-server
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake libclang-dev pkg-config
+
+      - name: Select stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Configure libclang
+        run: |
+          llvm_config="$(command -v llvm-config || command -v llvm-config-18 || command -v llvm-config-14)"
+          echo "LIBCLANG_PATH=$("$llvm_config" --libdir)" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo inputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: deploy-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Build server binary
+        run: |
+          cargo build \
+            --manifest-path src-tauri/Cargo.toml \
+            --locked \
+            --release \
+            --no-default-features
+          test -x src-tauri/target/release/shararam-live-client
+
+      - name: Set up SSH
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Ship and restart
+        run: |
+          BIN=src-tauri/target/release/shararam-live-client
+          SSH="ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
+          SCP="scp -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
+          TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
+
+          # Upload beside the live binary, then swap and restart so a failed
+          # upload never leaves a half-written executable in place.
+          $SCP "$BIN" "${TARGET}:${REMOTE_DIR}/${BINARY}.new"
+          $SSH "$TARGET" "
+            set -e
+            mv ${REMOTE_DIR}/${BINARY}.new ${REMOTE_DIR}/${BINARY}
+            chmod 755 ${REMOTE_DIR}/${BINARY}
+            sudo systemctl restart shararam
+            sleep 2
+            sudo systemctl is-active shararam
+          "
+
+      - name: Verify the site is up
+        run: |
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://shararam.sadfun.dev/ || true)
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "site did not return 200 after restart"
+          exit 1

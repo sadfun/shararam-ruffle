@@ -1,0 +1,290 @@
+name: Release builds
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            libayatana-appindicator3-dev \
+            libclang-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config
+
+      - name: Select stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Cache Cargo inputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: verify-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Run release checks
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --no-default-features -- -D warnings
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --no-default-features --features desktop -- -D warnings
+
+  build:
+    name: ${{ matrix.asset }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: windows-x86_64
+            runner: windows-2025
+            os: windows
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            archive: zip
+          - asset: windows-arm64
+            runner: windows-11-arm
+            os: windows
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+            archive: zip
+          - asset: macos-x86_64
+            runner: macos-15-intel
+            os: macos
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+            archive: tar.gz
+          - asset: macos-arm64
+            runner: macos-15
+            os: macos
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+            archive: tar.gz
+          - asset: linux-x86_64
+            runner: ubuntu-22.04
+            os: linux
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            archive: tar.gz
+          - asset: linux-arm64
+            runner: ubuntu-22.04-arm
+            os: linux
+            target: aarch64-unknown-linux-gnu
+            bundles: deb,appimage
+            archive: tar.gz
+
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            libayatana-appindicator3-dev \
+            libclang-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config
+
+      - name: Select stable Rust target
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add '${{ matrix.target }}'
+
+      - name: Configure LLVM on Linux
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          llvm_config="$(command -v llvm-config || command -v llvm-config-14)"
+          echo "LIBCLANG_PATH=$($llvm_config --libdir)" >> "$GITHUB_ENV"
+
+      - name: Configure LLVM on macOS
+        if: matrix.os == 'macos'
+        shell: bash
+        run: echo "LIBCLANG_PATH=$(brew --prefix llvm@18)/lib" >> "$GITHUB_ENV"
+
+      - name: Configure native Windows build
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          $llvmDirectory = if ($clang) { Split-Path $clang.Source } else { $null }
+          if (-not $llvmDirectory -or -not (Test-Path (Join-Path $llvmDirectory 'libclang.dll'))) {
+            $libclang = Get-ChildItem -Path $env:ProgramFiles -Filter libclang.dll -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $libclang) {
+              throw 'Unable to locate libclang.dll on the Windows runner'
+            }
+            $llvmDirectory = $libclang.DirectoryName
+          }
+          "LIBCLANG_PATH=$llvmDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\src-tauri\cmake\windows-no-asm.cmake" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache Cargo inputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: release-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Build browser server
+        shell: pwsh
+        run: |
+          cargo build `
+            --manifest-path src-tauri/Cargo.toml `
+            --locked `
+            --release `
+            --no-default-features `
+            --target '${{ matrix.target }}'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Server build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package browser server
+        shell: pwsh
+        run: |
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE 'release-assets'
+          $stageDirectory = Join-Path $env:RUNNER_TEMP 'shararam-live-server'
+          New-Item -ItemType Directory -Path $releaseDirectory,$stageDirectory -Force | Out-Null
+
+          $executableSuffix = if ('${{ matrix.os }}' -eq 'windows') { '.exe' } else { '' }
+          $source = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/${{ matrix.target }}/release/shararam-live-client$executableSuffix"
+          $serverName = "Shararam-Live-Server$executableSuffix"
+          $staged = Join-Path $stageDirectory $serverName
+          Copy-Item -LiteralPath $source -Destination $staged -Force
+
+          if ('${{ matrix.os }}' -ne 'windows') {
+            & chmod +x $staged
+          }
+
+          $archiveName = "Shararam-Live-Server-${{ matrix.asset }}.${{ matrix.archive }}"
+          $archive = Join-Path $releaseDirectory $archiveName
+          if ('${{ matrix.archive }}' -eq 'zip') {
+            Compress-Archive -LiteralPath $staged -DestinationPath $archive -Force
+          } else {
+            & tar -czf $archive -C $stageDirectory $serverName
+            if ($LASTEXITCODE -ne 0) {
+              throw "tar failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$archive.sha256", "$digest  $archiveName`n", [Text.UTF8Encoding]::new($false))
+
+      - name: Prepare optional macOS signing
+        if: matrix.os == 'macos'
+        shell: bash
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          if [[ -n "$SIGNING_IDENTITY" ]]; then
+            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          elif [[ -z "$CERTIFICATE" ]]; then
+            echo 'APPLE_SIGNING_IDENTITY=-' >> "$GITHUB_ENV"
+          fi
+          if [[ -n "$API_KEY_CONTENT" ]]; then
+            key_path="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s' "$API_KEY_CONTENT" > "$key_path"
+            chmod 600 "$key_path"
+            echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and upload desktop bundles
+        if: matrix.os != 'macos'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          releaseId: ${{ github.event.release.id }}
+          tagName: ${{ github.event.release.tag_name }}
+          releaseDraft: false
+          retryAttempts: 1
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          releaseAssetNamePattern: Shararam-Live-[version]-[platform]-[arch][setup][ext]
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --features desktop
+
+      - name: Build and upload macOS bundles
+        if: matrix.os == 'macos'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        with:
+          projectPath: src-tauri
+          releaseId: ${{ github.event.release.id }}
+          tagName: ${{ github.event.release.tag_name }}
+          releaseDraft: false
+          retryAttempts: 1
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          releaseAssetNamePattern: Shararam-Live-[version]-[platform]-[arch][setup][ext]
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --features desktop
+
+      - name: Upload browser server
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $assets = Get-ChildItem -LiteralPath release-assets -File | ForEach-Object FullName
+          gh release upload '${{ github.event.release.tag_name }}' @assets --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release upload failed with exit code $LASTEXITCODE"
+          }

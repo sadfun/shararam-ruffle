@@ -1,0 +1,2 @@
+set(OPENSSL_NO_ASM YES CACHE BOOL "Build BoringSSL without external NASM" FORCE)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL CACHE STRING "MSVC runtime" FORCE)
