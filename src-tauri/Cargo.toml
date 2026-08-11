@@ -1,6 +1,6 @@
 [package]
 name = "shararam-live-client"
-version = "0.2.0"
+version = "0.1.0"
 description = "A live Ruffle client for the official Shararam service"
 authors = ["Shararam preservation project"]
 edition = "2024"
