@@ -66,7 +66,7 @@ jobs:
             --locked \
             --release \
             --no-default-features
-          test -x src-tauri/target/release/shararam-live-client
+          test -x src-tauri/target/release/shararam-ruffle
 
       - name: Set up SSH
         run: |
@@ -78,7 +78,7 @@ jobs:
 
       - name: Ship and restart
         run: |
-          BIN=src-tauri/target/release/shararam-live-client
+          BIN=src-tauri/target/release/shararam-ruffle
           SSH="ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
           SCP="scp -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
           TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"

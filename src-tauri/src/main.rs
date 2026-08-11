@@ -1,6 +1,6 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use shararam_live_client::{http_server, state::AppState};
+use shararam_ruffle::{http_server, state::AppState};
 use std::net::Ipv4Addr;
 use tracing_subscriber::EnvFilter;
 
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
 
     if let Some(host) = &public_host {
         println!(
-            "Shararam Live (public): https://{host}/  ->  127.0.0.1:{}",
+            "Shararam Ruffle (public): https://{host}/  ->  127.0.0.1:{}",
             address.port()
         );
         server.await??;
@@ -67,10 +67,10 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "desktop")]
     if !args.iter().any(|arg| arg == "--serve") {
-        return shararam_live_client::desktop::run(&url, server);
+        return shararam_ruffle::desktop::run(&url, server);
     }
 
-    println!("Shararam Live: {url}");
+    println!("Shararam Ruffle: {url}");
     if !args.iter().any(|arg| arg == "--no-open") {
         let _ = webbrowser::open(&url);
     }

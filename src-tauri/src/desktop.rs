@@ -7,7 +7,7 @@ pub fn run(url: &str, server: JoinHandle<Result<(), std::io::Error>>) -> Result<
     tauri::Builder::default()
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(window_url))
-                .title("Шарарам Live")
+                .title("Шарарам Ruffle")
                 .inner_size(1320.0, 820.0)
                 .min_inner_size(815.0, 540.0)
                 .maximized(true)

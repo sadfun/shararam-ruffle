@@ -198,5 +198,5 @@ jobs:
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
           uploadPlainBinary: ${{ matrix.upload_plain_binary }}
-          releaseAssetNamePattern: Shararam-Live-[version]-[platform]-[arch][ext]
+          releaseAssetNamePattern: Shararam-Ruffle-[version]-[platform]-[arch][ext]
           args: --target ${{ matrix.target }} ${{ matrix.bundle_args }} --features desktop

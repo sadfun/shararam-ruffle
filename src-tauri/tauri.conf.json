@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Shararam Live",
-  "version": "0.1.1",
-  "identifier": "org.shararam.liveclient",
+  "productName": "Shararam Ruffle",
+  "version": "0.1.2",
+  "identifier": "dev.sadfun.shararam-ruffle",
   "build": {
     "frontendDist": "../web"
   },
@@ -22,7 +22,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Актуальный Шарарам в Ruffle",
-    "longDescription": "Браузерный клиент, который запускает актуальные официальные SWF Шарарама в Ruffle."
+    "shortDescription": "Неофициальный клиент Шарарама на Ruffle",
+    "longDescription": "Неофициальный клиент, который запускает актуальные игровые SWF Шарарама в Ruffle."
   }
 }

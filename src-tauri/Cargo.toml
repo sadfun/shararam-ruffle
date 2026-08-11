@@ -1,7 +1,7 @@
 [package]
-name = "shararam-live-client"
-version = "0.1.1"
-description = "A live Ruffle client for the official Shararam service"
+name = "shararam-ruffle"
+version = "0.1.2"
+description = "An unofficial Shararam client powered by Ruffle"
 authors = ["Shararam preservation project"]
 edition = "2024"
 license = "MIT"
@@ -9,11 +9,11 @@ repository = "https://github.com/sadfun/shararam-ruffle"
 build = "build.rs"
 
 [lib]
-name = "shararam_live_client"
+name = "shararam_ruffle"
 path = "src/lib.rs"
 
 [[bin]]
-name = "shararam-live-client"
+name = "shararam-ruffle"
 path = "src/main.rs"
 
 [features]

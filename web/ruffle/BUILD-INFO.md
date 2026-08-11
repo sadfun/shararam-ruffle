@@ -1,6 +1,6 @@
 # RTMP-capable Ruffle build
 
-This is the only Ruffle distribution shipped with Shararam Live.
+This is the only Ruffle distribution shipped with Shararam Ruffle.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/rtmp-netconnection`

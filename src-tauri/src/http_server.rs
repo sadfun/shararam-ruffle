@@ -988,6 +988,8 @@ mod tests {
         assert!(index.contains("https://github.com/sadfun/shararam-ruffle"));
         assert!(index.contains(r#"id="hosted-note""#));
         assert!(index.contains("<title>Шарарам Ruffle</title>"));
+        assert!(index.contains(r#"<link rel="icon" href="/favicon.ico" sizes="any">"#));
+        assert!(WebAssets::get("favicon.ico").is_some());
 
         let app = WebAssets::get("app.js").unwrap();
         let app = std::str::from_utf8(&app.data).unwrap();

@@ -178,7 +178,7 @@
       await startGame();
     } catch (cause) { error.textContent = cause.message; button.disabled = false; }
   });
-  if (!capability) { login.hidden = true; fatal.hidden = false; fatalText.textContent = "Запустите приложение через shararam-live-client."; }
+  if (!capability) { login.hidden = true; fatal.hidden = false; fatalText.textContent = "Запустите приложение Shararam Ruffle."; }
   else api("/api/status").then(result => { if (result.authenticated) startGame(); }).catch(() => {});
 
   window.OnLoad = () => { loading.hidden = true; };
