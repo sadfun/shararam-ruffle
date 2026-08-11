@@ -32,13 +32,54 @@
   const ruffleState = { mounted: false, sharedObjectImported: false };
   window.__shararamRuffle = { state: ruffleState, getPlayer: () => player };
 
+  // The stage of the official base.swf. Ruffle fills any leftover room inside
+  // its own canvas with black bars, so the player element is measured against
+  // the real container box and never left larger than the stage it shows.
+  const STAGE_WIDTH = 815;
+  const STAGE_HEIGHT = 495;
+  function fitPlayerToStage() {
+    if (!player) return;
+    const box = document.getElementById("game").getBoundingClientRect();
+    if (!box.width || !box.height) return;
+    const scale = Math.min(box.width / STAGE_WIDTH, box.height / STAGE_HEIGHT);
+    player.style.width = `${Math.floor(STAGE_WIDTH * scale)}px`;
+    player.style.height = `${Math.floor(STAGE_HEIGHT * scale)}px`;
+  }
+  window.addEventListener("resize", fitPlayerToStage);
+  new ResizeObserver(fitPlayerToStage).observe(document.getElementById("game"));
+
+  // Ruffle falls back to a software renderer when the browser has hardware
+  // acceleration switched off, which costs exactly the performance this client
+  // exists for. Stay silent unless the renderer is known to be software.
+  function softwareRenderer() {
+    try {
+      const probe = document.createElement("canvas");
+      const gl = probe.getContext("webgl2") || probe.getContext("webgl");
+      if (!gl) return true;
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      if (!info) return false;
+      const renderer = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL) || "");
+      return /swiftshader|llvmpipe|softpipe|basic render|software/i.test(renderer);
+    } catch (_) {
+      return false;
+    }
+  }
+  if (softwareRenderer()) document.getElementById("accel-note").hidden = false;
+
+  document.getElementById("exit").addEventListener("click", async () => {
+    window.ReconnectDisable();
+    try {
+      await api("/api/logout", { method: "POST" });
+    } catch (_) {}
+    location.reload();
+  });
+
   async function mountOriginalClient({ swfUrl, originalSwfUrl, parameters }) {
     const source = window.RufflePlayer?.newest();
     if (!source) throw new Error("Ruffle не загрузился");
     player = source.createPlayer();
     player.id = "base";
-    player.style.width = "100%";
-    player.style.height = "100%";
+    fitPlayerToStage();
     const overlayGuard = document.createElement("style");
     overlayGuard.textContent = "#unmute-overlay { display: none !important; }";
     player.shadowRoot?.appendChild(overlayGuard);

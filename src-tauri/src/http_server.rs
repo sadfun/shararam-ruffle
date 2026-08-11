@@ -38,6 +38,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(static_index))
         .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/shared-object", get(shared_object))
         .route("/api/status", get(status))
@@ -151,6 +152,24 @@ async fn login(
         )
             .into_response(),
     }
+}
+
+/// Drops the official session this browser holds. Without it a reload would
+/// simply walk back into the game, because the cookie still resolves.
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !valid_capability_header(&state, &headers) {
+        return forbidden();
+    }
+    if let Some(id) = session_id(&headers) {
+        state.sessions.write().await.remove(id);
+    }
+    let secure = if state.is_public() { "; Secure" } else { "" };
+    let cookie = format!("shlive_session=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0");
+    let mut response = axum::Json(json!({"ok": true})).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    response
 }
 
 async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -884,16 +903,74 @@ mod tests {
     }
 
     #[test]
-    fn the_stage_fills_the_player_so_no_letterbox_bars_cover_the_page_gradient() {
-        let styles = WebAssets::get("styles.css").unwrap();
-        let styles = std::str::from_utf8(&styles.data).unwrap();
-        // 815x495 is the stage of the official base.swf.
-        assert!(styles.contains("aspect-ratio: 815 / 495"));
-        assert!(!styles.contains("ruffle-player { display: block; width: 100%; height: 100%; }"));
+    fn the_player_is_fitted_to_the_stage_so_ruffle_draws_no_black_bars() {
+        let app = WebAssets::get("app.js").unwrap();
+        let app = std::str::from_utf8(&app.data).unwrap();
+        // 815x495 is the stage of the official base.swf. Measuring the real
+        // container box keeps this correct where viewport units were not.
+        assert!(app.contains("const STAGE_WIDTH = 815;"));
+        assert!(app.contains("const STAGE_HEIGHT = 495;"));
+        assert!(app.contains("Math.min(box.width / STAGE_WIDTH, box.height / STAGE_HEIGHT)"));
+        assert!(app.contains(r#"window.addEventListener("resize", fitPlayerToStage)"#));
+        assert!(!app.contains(r#"player.style.width = "100%""#));
 
         let config = WebAssets::get("ruffle-config.js").unwrap();
         let config = std::str::from_utf8(&config.data).unwrap();
         assert!(config.contains("letterbox: \"on\""));
+    }
+
+    #[test]
+    fn a_software_renderer_gets_a_hardware_acceleration_notice() {
+        let index = WebAssets::get("index.html").unwrap();
+        let index = std::str::from_utf8(&index.data).unwrap();
+        assert!(index.contains(r#"id="accel-note""#));
+        assert!(index.contains("chrome://settings/system"));
+
+        let app = WebAssets::get("app.js").unwrap();
+        let app = std::str::from_utf8(&app.data).unwrap();
+        assert!(app.contains("WEBGL_debug_renderer_info"));
+        assert!(app.contains("swiftshader|llvmpipe|softpipe|basic render|software"));
+    }
+
+    #[tokio::test]
+    async fn logout_drops_the_session_and_expires_the_cookie() {
+        let state = AppState::new().unwrap();
+        let capability = state.capability().to_owned();
+        state.sessions.write().await.insert(
+            "live-session".to_owned(),
+            OfficialSession {
+                client: wreq_transport::Client::new(),
+                servers: Default::default(),
+                swf_url: Default::default(),
+                tunnel_active: Default::default(),
+            },
+        );
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/logout")
+                    .header("x-shararam-live-capability", &capability)
+                    .header(header::COOKIE, "shlive_session=live-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(
+            state.sessions.read().await.is_empty(),
+            "the official session must not survive a logout"
+        );
     }
 
     #[test]

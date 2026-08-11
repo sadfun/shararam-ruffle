@@ -15,10 +15,17 @@ button:disabled { opacity: .6; cursor: wait; }
 .note { margin: 14px 0 0; color: #7f9fb0; font-size: 12px; text-align: center; }
 .note a { color: #3f97c4; }
 #hosted-note { margin-top: 16px; padding: 9px 11px; border-radius: 9px; background: #eaf6fc; color: #4a7f88; }
-#loading { position: fixed; inset: auto 24px 24px auto; padding: 10px 15px; border-radius: 20px; background: #15384dcc; color: white; font-weight: bold; }
-/* The stage is 815x495 (from base.swf). Sizing the player to that exact ratio
-   leaves no letterbox inside it, so the page gradient runs uninterrupted on
-   both sides instead of the movie painting its margins. */
+#loading { position: fixed; inset: auto 24px 44px auto; padding: 10px 15px; border-radius: 20px; background: #15384dcc; color: white; font-weight: bold; }
+.warn { margin: 14px 0 0; padding: 10px 12px; border-radius: 9px; background: #fff4e0; color: #7a5320; font-size: 12px; line-height: 1.4; text-align: left; }
+.warn p { margin: 7px 0 0; }
+.warn code { padding: 1px 4px; border-radius: 4px; background: #f0e0c4; font-size: 11px; }
+#exit { position: fixed; z-index: 21; right: 7px; bottom: 7px; width: auto; margin: 0; padding: 3px 9px; border-radius: 6px; background: #15384d73; color: #eaf6fc; box-shadow: none; font-family: inherit; font-size: 11px; font-weight: normal; line-height: 1.4; opacity: .5; }
+#exit:hover { background: #15384dd9; opacity: 1; }
+#exit:active { transform: none; box-shadow: none; }
+/* The player is sized to the exact 815x495 stage of base.swf by fitPlayerToStage()
+   in app.js, so Ruffle never has a letterbox area of its own (it paints those
+   bars black inside its canvas) and the page gradient shows around the game.
+   These values are only the pre-script fallback. */
 #game { display: grid; place-items: center; }
-ruffle-player { display: block; aspect-ratio: 815 / 495; width: min(100%, calc(100vh * 815 / 495)); height: auto; max-height: 100%; }
+ruffle-player { display: block; width: 100%; height: 100%; }
 #debug-state { position: fixed; z-index: 20; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 7px 10px; border-radius: 7px; background: #061b25d9; color: #9ff0a8; font: 12px/1.35 Consolas, monospace; overflow-wrap: anywhere; pointer-events: none; }

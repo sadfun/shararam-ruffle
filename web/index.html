@@ -20,12 +20,18 @@
         <button type="submit">Войти</button>
       </form>
       <p id="login-error" class="error" role="alert"></p>
+      <div id="accel-note" class="warn" hidden>
+        <b>Аппаратное ускорение выключено.</b> Без него Ruffle рисует кадры на процессоре, и игра будет тормозить — это как раз то преимущество, ради которого стоит включить ускорение.
+        <p>Chrome и Edge: откройте <code>chrome://settings/system</code> (в Edge — <code>edge://settings/system</code>), включите «Использовать аппаратное ускорение (при наличии)» и перезапустите браузер.</p>
+        <p>Firefox: Настройки → Общие → Производительность → снимите «Использовать рекомендуемые настройки производительности» и включите «По возможности использовать аппаратное ускорение».</p>
+      </div>
       <p id="hosted-note" class="note" hidden>Для лучшей безопасности и скорости <a href="https://github.com/sadfun/shararam-ruffle/releases" target="_blank" rel="noopener">скачайте десктопное приложение</a></p>
       <p class="note">Неофициальный клиент Шарарама на Ruffle · <a href="https://github.com/sadfun/shararam-ruffle" target="_blank" rel="noopener">GitHub</a></p>
     </section>
     <section id="game-shell" hidden>
       <div id="game"></div>
       <div id="loading">Загружаем Шарарам…</div>
+      <button id="exit" type="button" title="Выйти из аккаунта">выход</button>
     </section>
     <section id="fatal" class="card" hidden><h1>Не удалось запустить клиент</h1><p id="fatal-text"></p></section>
     <output id="debug-state" hidden></output>
