@@ -122,7 +122,11 @@
   const api = async (path, options = {}) => {
     const response = await fetch(path, { ...options, headers: { "X-Shararam-Live-Capability": capability, ...(options.headers || {}) } });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok) {
+      const cause = new Error(data.error || `HTTP ${response.status}`);
+      cause.status = response.status;
+      throw cause;
+    }
     return data;
   };
   async function importNativeSharedObject() {
@@ -163,7 +167,16 @@
       });
       loading.hidden = true;
     } catch (cause) {
-      gameShell.hidden = true; fatal.hidden = false; fatalText.textContent = cause.message;
+      gameShell.hidden = true;
+      if (cause.status === 401) {
+        fatal.hidden = true;
+        login.hidden = false;
+        error.textContent = cause.message;
+        form.querySelector("button").disabled = false;
+      } else {
+        fatal.hidden = false;
+        fatalText.textContent = cause.message;
+      }
     }
   }
   form.addEventListener("submit", async event => {

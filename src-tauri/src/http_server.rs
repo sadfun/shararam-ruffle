@@ -8,7 +8,7 @@ use axum::{
     Router,
     body::{Body, Bytes, to_bytes},
     extract::{Path, Query, Request, State, WebSocketUpgrade},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -163,12 +163,8 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(id) = session_id(&headers) {
         state.sessions.write().await.remove(id);
     }
-    let secure = if state.is_public() { "; Secure" } else { "" };
-    let cookie = format!("shlive_session=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0");
     let mut response = axum::Json(json!({"ok": true})).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    expire_session_cookie(&state, &mut response);
     response
 }
 
@@ -249,25 +245,29 @@ struct BootstrapResult {
 }
 
 async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    bootstrap_from_origin(state, headers, OFFICIAL_ORIGIN).await
+}
+
+async fn bootstrap_from_origin(
+    state: AppState,
+    headers: HeaderMap,
+    official_origin: &str,
+) -> Response {
     if !valid_capability_header(&state, &headers) {
         return forbidden();
     }
-    let Some(session) = session(&state, &headers).await else {
+    let Some(session_id) = session_id(&headers).map(str::to_owned) else {
         return (StatusCode::UNAUTHORIZED, "Login required").into_response();
     };
-    let page = match session
-        .client
-        .get(format!("{OFFICIAL_ORIGIN}/game"))
-        .send()
-        .await
-    {
-        Ok(response) => match response.error_for_status() {
-            Ok(response) => match response.text().await {
-                Ok(page) => page,
-                Err(error) => return internal(error),
-            },
-            Err(error) => return internal(error),
-        },
+    let Some(session) = state.sessions.read().await.get(&session_id).cloned() else {
+        return (StatusCode::UNAUTHORIZED, "Login required").into_response();
+    };
+    let page = match fetch_official_bootstrap(&session.client, official_origin).await {
+        Ok(Some(page)) => page,
+        Ok(None) => {
+            state.sessions.write().await.remove(&session_id);
+            return expired_session(&state);
+        }
         Err(error) => return internal(error),
     };
     let parameters = match parse_official_flashvars(&page) {
@@ -284,6 +284,59 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         swf_url,
     })
     .into_response()
+}
+
+async fn fetch_official_bootstrap(
+    client: &wreq_transport::Client,
+    origin: &str,
+) -> anyhow::Result<Option<String>> {
+    // Do not follow /game -> /login. Following it hides an expired official
+    // session and makes the login page look like a malformed game bootstrap.
+    let response = client
+        .get(format!("{origin}/game"))
+        .redirect(wreq_transport::redirect::Policy::none())
+        .send()
+        .await?;
+    if is_login_redirect(response.status(), response.headers()) {
+        return Ok(None);
+    }
+    if response.status().is_redirection() {
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("<missing Location>");
+        anyhow::bail!("official /game redirected unexpectedly to {location}");
+    }
+    let page = response.error_for_status()?.text().await?;
+    Ok(Some(page))
+}
+
+fn is_login_redirect(status: StatusCode, headers: &HeaderMap) -> bool {
+    status.is_redirection()
+        && headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<Uri>().ok())
+            .is_some_and(|location| location.path() == "/login")
+}
+
+fn expired_session(state: &AppState) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(json!({"error": "Сессия истекла. Войдите снова."})),
+    )
+        .into_response();
+    expire_session_cookie(state, &mut response);
+    response
+}
+
+fn expire_session_cookie(state: &AppState, response: &mut Response) {
+    let secure = if state.is_public() { "; Secure" } else { "" };
+    let cookie = format!("shlive_session=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0");
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
 }
 
 fn official_swf_url(page: &str) -> anyhow::Result<String> {
@@ -705,7 +758,7 @@ fn internal(error: impl std::fmt::Display) -> Response {
 mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt, stream};
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, time::Duration};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{
         Message as ClientMessage, client::IntoClientRequest, http::HeaderValue as ClientHeaderValue,
@@ -821,6 +874,76 @@ mod tests {
         assert!(!body.contains("diagnostics"));
     }
 
+    #[tokio::test]
+    async fn expired_official_session_returns_unauthorized_and_is_removed() {
+        let upstream = Router::new()
+            .route(
+                "/game",
+                get(|| async { (StatusCode::FOUND, [(header::LOCATION, "/login")]) }),
+            )
+            .route("/login", get(|| async { "official login page" }));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let state = AppState::with_public_host("shararam.sadfun.dev").unwrap();
+        let capability = state.capability().to_owned();
+        state.sessions.write().await.insert(
+            "expired-session".to_owned(),
+            OfficialSession {
+                client: wreq_transport::Client::builder()
+                    .redirect(wreq_transport::redirect::Policy::limited(5))
+                    .build()
+                    .unwrap(),
+                servers: Default::default(),
+                swf_url: Default::default(),
+                tunnel_active: Default::default(),
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-shararam-live-capability",
+            HeaderValue::from_str(&capability).unwrap(),
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("shlive_session=expired-session"),
+        );
+
+        let response = bootstrap_from_origin(state.clone(), headers, &origin).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.sessions.read().await.is_empty());
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(cookie.contains("Secure"));
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Сессия истекла"));
+
+        server.abort();
+    }
+
+    #[test]
+    fn only_redirects_to_the_official_login_are_treated_as_expired() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::LOCATION,
+            HeaderValue::from_static("https://www.shararam.ru/login?returnUrl=%2Fgame"),
+        );
+        assert!(is_login_redirect(StatusCode::FOUND, &headers));
+        assert!(!is_login_redirect(StatusCode::OK, &headers));
+
+        headers.insert(header::LOCATION, HeaderValue::from_static("/maintenance"));
+        assert!(!is_login_redirect(StatusCode::TEMPORARY_REDIRECT, &headers));
+    }
+
     #[test]
     fn embedded_flash_server_urls_keep_the_required_trailing_slash() {
         let app = WebAssets::get("app.js").unwrap();
@@ -900,6 +1023,9 @@ mod tests {
         assert!(app.contains("localStorage.setItem(key, btoa(binary))"));
         assert!(app.contains("player?.ReconnectDisable?.()"));
         assert!(app.contains("window.addEventListener(\"beforeunload\""));
+        assert!(app.contains("cause.status === 401"));
+        assert!(app.contains("login.hidden = false"));
+        assert!(app.contains("form.querySelector(\"button\").disabled = false"));
     }
 
     #[test]
