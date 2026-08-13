@@ -48,6 +48,14 @@ async fn main() -> Result<()> {
         Some(host) => AppState::with_public_host(host.clone())?,
         None => AppState::new()?,
     };
+    #[cfg(debug_assertions)]
+    let state = match std::env::var("SHARARAM_E2E_OFFICIAL_ORIGIN") {
+        Ok(origin) if !origin.is_empty() => {
+            tracing::warn!(%origin, "debug build uses the local e2e official origin");
+            state.with_debug_official_origin(origin)
+        }
+        _ => state,
+    };
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, requested_port)).await?;
     let address = listener.local_addr()?;
     let capability = state.capability().to_owned();

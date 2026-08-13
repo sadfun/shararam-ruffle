@@ -131,7 +131,7 @@ async fn login(
     if !valid_capability_header(&state, &headers) {
         return forbidden();
     }
-    match OfficialSession::login(&request.login, &request.password).await {
+    match OfficialSession::login(state.official_origin(), &request.login, &request.password).await {
         Ok(session) => {
             let id = Uuid::new_v4().to_string();
             state.sessions.write().await.insert(id.clone(), session);
@@ -245,7 +245,8 @@ struct BootstrapResult {
 }
 
 async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    bootstrap_from_origin(state, headers, OFFICIAL_ORIGIN).await
+    let official_origin = state.official_origin().to_owned();
+    bootstrap_from_origin(state, headers, &official_origin).await
 }
 
 async fn bootstrap_from_origin(
@@ -318,7 +319,10 @@ fn is_login_redirect(status: StatusCode, headers: &HeaderMap) -> bool {
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<Uri>().ok())
-            .is_some_and(|location| location.path() == "/login")
+            .is_some_and(|location| {
+                let path = location.path();
+                path == "/login" || path.starts_with("/login/")
+            })
 }
 
 fn expired_session(state: &AppState) -> Response {
@@ -879,7 +883,7 @@ mod tests {
         let upstream = Router::new()
             .route(
                 "/game",
-                get(|| async { (StatusCode::FOUND, [(header::LOCATION, "/login")]) }),
+                get(|| async { (StatusCode::FOUND, [(header::LOCATION, "/login/game")]) }),
             )
             .route("/login", get(|| async { "official login page" }));
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -931,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn only_redirects_to_the_official_login_are_treated_as_expired() {
+    fn only_redirects_to_official_login_routes_are_treated_as_expired() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::LOCATION,
@@ -940,8 +944,23 @@ mod tests {
         assert!(is_login_redirect(StatusCode::FOUND, &headers));
         assert!(!is_login_redirect(StatusCode::OK, &headers));
 
+        headers.insert(
+            header::LOCATION,
+            HeaderValue::from_static("/login/game?returnUrl=%2Fgame"),
+        );
+        assert!(is_login_redirect(StatusCode::TEMPORARY_REDIRECT, &headers));
+
+        headers.insert(header::LOCATION, HeaderValue::from_static("/login/"));
+        assert!(is_login_redirect(StatusCode::PERMANENT_REDIRECT, &headers));
+
         headers.insert(header::LOCATION, HeaderValue::from_static("/maintenance"));
         assert!(!is_login_redirect(StatusCode::TEMPORARY_REDIRECT, &headers));
+
+        headers.insert(
+            header::LOCATION,
+            HeaderValue::from_static("/login-elsewhere"),
+        );
+        assert!(!is_login_redirect(StatusCode::FOUND, &headers));
     }
 
     #[test]

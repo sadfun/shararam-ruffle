@@ -38,7 +38,7 @@ struct OfficialLoginResponse {
 }
 
 impl OfficialSession {
-    pub async fn login(login: &str, password: &str) -> Result<Self> {
+    pub async fn login(official_origin: &str, login: &str, password: &str) -> Result<Self> {
         if login.trim().is_empty() || password.is_empty() {
             bail!("Введите логин и пароль");
         }
@@ -53,7 +53,7 @@ impl OfficialSession {
             .build()?;
 
         client
-            .get(format!("{OFFICIAL_ORIGIN}/login"))
+            .get(format!("{official_origin}/login"))
             .send()
             .await
             .context("официальная страница входа недоступна")?
@@ -64,9 +64,9 @@ impl OfficialSession {
         let body =
             serde_json::json!({ "login": login.trim(), "password": password_hash }).to_string();
         let response = client
-            .post(format!("{OFFICIAL_ORIGIN}/api/user/loqin"))
-            .header("Origin", OFFICIAL_ORIGIN)
-            .header("Referer", format!("{OFFICIAL_ORIGIN}/login"))
+            .post(format!("{official_origin}/api/user/loqin"))
+            .header("Origin", official_origin)
+            .header("Referer", format!("{official_origin}/login"))
             .header("X-Requested-With", "XMLHttpRequest")
             .header(
                 "Content-Type",

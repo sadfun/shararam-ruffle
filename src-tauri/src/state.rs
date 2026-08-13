@@ -3,12 +3,13 @@ use rand::RngCore;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
-use crate::auth::OfficialSession;
+use crate::auth::{OFFICIAL_ORIGIN, OfficialSession};
 use serde::Serialize;
 
 #[derive(Clone)]
 pub struct AppState {
     capability: Arc<str>,
+    official_origin: Arc<str>,
     /// External host when the companion runs as a public server behind a
     /// TLS-terminating reverse proxy (e.g. `shararam.sadfun.dev`). `None` means
     /// the default single-user loopback mode.
@@ -45,6 +46,7 @@ impl AppState {
         let capability = hex::encode(random);
         Ok(Self {
             capability: capability.into(),
+            official_origin: Arc::from(OFFICIAL_ORIGIN),
             public_host: None,
             sessions: Default::default(),
             official_base: Default::default(),
@@ -63,6 +65,19 @@ impl AppState {
 
     pub fn capability(&self) -> &str {
         &self.capability
+    }
+
+    pub fn official_origin(&self) -> &str {
+        &self.official_origin
+    }
+
+    /// Point debug builds at a local fake of the official site. Keeping this
+    /// unavailable in release builds prevents credentials from ever being
+    /// redirected through a runtime option in production.
+    #[cfg(debug_assertions)]
+    pub fn with_debug_official_origin(mut self, origin: impl Into<String>) -> Self {
+        self.official_origin = Arc::from(origin.into());
+        self
     }
 
     pub fn public_host(&self) -> Option<&str> {
