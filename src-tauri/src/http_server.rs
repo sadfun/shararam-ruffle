@@ -825,7 +825,16 @@ async fn official_proxy(
         Err(error) => return internal(error),
     };
     let headers_at = profiler::now_us();
-    let response_headers = official_response_headers(upstream.headers());
+    let mut response_headers = official_response_headers(upstream.headers());
+    if path.starts_with("fs/") {
+        // The local disk cache owns asset persistence. Keeping the WebView's
+        // HTTP cache out of the loop makes SWF-patch toggles apply instantly
+        // and prevents stale patched bytes from surviving a config change
+        // (the WebView cache persists across launches on the stable port).
+        response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response_headers.remove(header::ETAG);
+        response_headers.remove(header::LAST_MODIFIED);
+    }
     if path.eq_ignore_ascii_case("async/ServerAction") {
         let bytes = match upstream.bytes().await {
             Ok(bytes) => bytes,
@@ -1064,11 +1073,9 @@ fn asset_response(path: &str, body: Vec<u8>, content_type: Option<String>) -> Re
             .unwrap()
         });
     headers.insert(header::CONTENT_TYPE, content_type);
-    // Content-addressed files: let the WebView cache them hard too.
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=31536000, immutable"),
-    );
+    // The disk cache is the only persistence layer; the WebView must
+    // re-request so patch-config changes always apply (hits are local).
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert("x-shararam-asset-cache", HeaderValue::from_static("hit"));
     if patched {
         headers.insert(
