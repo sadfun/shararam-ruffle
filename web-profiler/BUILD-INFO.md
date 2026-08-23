@@ -5,7 +5,7 @@ Served at `/ruffle/` **only** by profiling builds of the client
 never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
-- branch: `shararam/profiler` (on top of `shararam/rtmp-netconnection`)
+- branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
 - revision: `1f8fa3107`
 - build: `cd web && npm run build:shararam-profiler`
   (release profile + wasm-opt, identical to a regular build except for the
