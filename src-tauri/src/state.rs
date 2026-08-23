@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::auth::{OFFICIAL_ORIGIN, OfficialSession};
+use crate::profiler::Profiler;
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -17,6 +18,8 @@ pub struct AppState {
     pub sessions: Arc<RwLock<HashMap<String, OfficialSession>>>,
     pub official_base: Arc<RwLock<Option<CachedBase>>>,
     pub diagnostics: Arc<RwLock<Diagnostics>>,
+    /// Profiling session (a no-op shell unless built with `--features profiler`).
+    pub profiler: Profiler,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -51,7 +54,15 @@ impl AppState {
             sessions: Default::default(),
             official_base: Default::default(),
             diagnostics: Default::default(),
+            profiler: Profiler::default(),
         })
+    }
+
+    /// Attaches a profiling session; every route and the socket tunnel
+    /// report into it.
+    pub fn with_profiler(mut self, profiler: Profiler) -> Self {
+        self.profiler = profiler;
+        self
     }
 
     /// Build a state for public hosted mode behind a reverse proxy that

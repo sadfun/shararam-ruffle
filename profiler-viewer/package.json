@@ -1,0 +1,19 @@
+{
+  "name": "shararam-profiler-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Viewer for Shararam Ruffle profiling sessions (.duckdb)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "1.33.1-dev57.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.1.3"
+  }
+}

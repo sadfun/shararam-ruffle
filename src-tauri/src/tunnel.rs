@@ -10,6 +10,7 @@ use tokio::{
 };
 use url::Url;
 
+use crate::profiler::{self, Profiler};
 use crate::state::Diagnostics;
 
 const BUFFER_SIZE: usize = 64 * 1024;
@@ -37,6 +38,7 @@ pub async fn run(
     mut websocket: WebSocket,
     endpoint: String,
     diagnostics: Arc<RwLock<Diagnostics>>,
+    profiler: Profiler,
 ) {
     {
         let mut diagnostics = diagnostics.write().await;
@@ -44,9 +46,32 @@ pub async fn run(
         diagnostics.tunnel_active = true;
         diagnostics.last_tunnel_error = None;
     }
+    let opened = profiler::now_us();
+    profiler.event(
+        "socket",
+        "tunnel_open",
+        opened,
+        0,
+        Some(format!("{{\"endpoint\":{}}}", serde_json::json!(endpoint))),
+    );
 
     let mut counts = ByteCounts::default();
-    let result = copy(&mut websocket, &endpoint, &mut counts).await;
+    let result = copy(&mut websocket, &endpoint, &mut counts, &profiler).await;
+    profiler.event(
+        "socket",
+        "tunnel_close",
+        opened,
+        profiler::now_us() - opened,
+        Some(
+            serde_json::json!({
+                "endpoint": endpoint,
+                "browser_to_tcp": counts.browser_to_tcp,
+                "tcp_to_browser": counts.tcp_to_browser,
+                "error": result.as_ref().err().map(|error| error.to_string()),
+            })
+            .to_string(),
+        ),
+    );
     {
         let mut diagnostics = diagnostics.write().await;
         diagnostics.tunnel_closes += 1;
@@ -63,17 +88,43 @@ pub async fn run(
     let _ = websocket.close().await;
 }
 
-async fn copy(websocket: &mut WebSocket, endpoint: &str, counts: &mut ByteCounts) -> Result<()> {
+async fn copy(
+    websocket: &mut WebSocket,
+    endpoint: &str,
+    counts: &mut ByteCounts,
+    profiler: &Profiler,
+) -> Result<()> {
     let (host, port) = endpoint_target(endpoint)?;
+    let connect_started = profiler::now_us();
     let tcp = TcpStream::connect((host.as_str(), port))
         .await
         .with_context(|| format!("could not connect to approved socket endpoint {host}:{port}"))?;
+    profiler.event(
+        "socket",
+        "tcp_connect",
+        connect_started,
+        profiler::now_us() - connect_started,
+        Some(format!(
+            "{{\"host\":{},\"port\":{port}}}",
+            serde_json::json!(host)
+        )),
+    );
     tcp.set_nodelay(true)?;
     let (mut tcp_reader, mut tcp_writer) = tcp.into_split();
     let mut buffer = vec![0; BUFFER_SIZE];
+    // Throughput samples once a second, so the viewer can show traffic
+    // volume next to the RPC events.
+    let mut sample_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut sampled = ByteCounts::default();
 
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(sample_deadline), if profiler.enabled() => {
+                profiler.sample("tunnel_up_bytes", (counts.browser_to_tcp - sampled.browser_to_tcp) as f64);
+                profiler.sample("tunnel_down_bytes", (counts.tcp_to_browser - sampled.tcp_to_browser) as f64);
+                sampled = ByteCounts { browser_to_tcp: counts.browser_to_tcp, tcp_to_browser: counts.tcp_to_browser };
+                sample_deadline += std::time::Duration::from_secs(1);
+            }
             incoming = websocket.recv() => {
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {

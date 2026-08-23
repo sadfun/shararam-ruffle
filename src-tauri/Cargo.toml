@@ -19,6 +19,10 @@ path = "src/main.rs"
 [features]
 default = []
 desktop = ["dep:tauri"]
+# Profiling build: records frames, Ruffle events, RTMP RPC and proxy activity
+# into a DuckDB file (see src/profiler.rs and web/profiler.js). Serves the
+# profiler-instrumented Ruffle from web-profiler/ instead of web/ruffle/.
+profiler = ["dep:duckdb", "serde_json/raw_value"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +40,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", optional = true }
+duckdb = { version = "1.10505.0", features = ["bundled"], optional = true }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

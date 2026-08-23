@@ -7,3 +7,7 @@
 *.log
 .DS_Store
 *.profraw
+/profiles/
+node_modules/
+/profiler-viewer/dist/
+/profiler-viewer/public/*.duckdb

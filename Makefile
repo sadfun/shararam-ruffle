@@ -3,7 +3,7 @@
 POWERSHELL ?= powershell
 BUILD := $(POWERSHELL) -NoProfile -ExecutionPolicy Bypass -File ./build.ps1
 
-.PHONY: help check server exe all release clean
+.PHONY: help check server exe all release clean profiler
 
 help:
 	@$(BUILD) help
@@ -16,6 +16,9 @@ server:
 
 exe:
 	@$(BUILD) exe
+
+profiler:
+	@$(BUILD) profiler
 
 all:
 	@$(BUILD) all

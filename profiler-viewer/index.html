@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Shararam Profiler</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>📈</text></svg>">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">Shararam&nbsp;Profiler</div>
+      <label class="open-button" for="file-input">Открыть профиль…</label>
+      <input id="file-input" type="file" accept=".duckdb,.db" hidden>
+      <div id="session-info" class="session-info"></div>
+      <div class="spacer"></div>
+      <div id="status" class="status">загрузка движка…</div>
+    </header>
+
+    <div id="drop-hint">
+      <div class="drop-card">
+        <h1>📈 Профиль Шарарама</h1>
+        <p>Откройте <code>shararam-profile-*.duckdb</code>, записанный профилировочной сборкой,<br>
+        или перетащите файл сюда.</p>
+        <p class="hint">Файл создаётся сборкой <code>make profiler</code> рядом с exe в папке <code>profiles/</code>.</p>
+      </div>
+    </div>
+
+    <main id="workspace" hidden>
+      <section id="fps-section">
+        <div class="section-title">FPS <span id="fps-summary" class="dim"></span></div>
+        <canvas id="fps-canvas"></canvas>
+      </section>
+      <section id="timeline-section">
+        <div class="section-title">
+          События
+          <span class="dim" id="event-summary"></span>
+          <span class="controls-hint">колесо — зум · перетаскивание — прокрутка · клик — детали</span>
+        </div>
+        <div id="timeline-wrap">
+          <canvas id="timeline-canvas"></canvas>
+        </div>
+      </section>
+      <section id="bottom">
+        <nav id="tabs">
+          <button data-tab="details" class="active">Детали</button>
+          <button data-tab="rtmp">RTMP</button>
+          <button data-tab="loads">Загрузки</button>
+          <button data-tab="slow">Медленное</button>
+          <button data-tab="sql">SQL</button>
+        </nav>
+        <div id="tab-details" class="tab active"><div id="details" class="details-empty">Кликните по событию на таймлайне.</div></div>
+        <div id="tab-rtmp" class="tab"><div id="rtmp-table"></div></div>
+        <div id="tab-loads" class="tab"><div id="loads-table"></div></div>
+        <div id="tab-slow" class="tab"><div id="slow-table"></div></div>
+        <div id="tab-sql" class="tab">
+          <div class="sql-bar">
+            <textarea id="sql-input" rows="3" spellcheck="false">SELECT source, cat, name, count(*) AS n, round(sum(dur_us)/1000.0, 1) AS total_ms
+FROM events GROUP BY 1,2,3 ORDER BY total_ms DESC LIMIT 30</textarea>
+            <button id="sql-run">Выполнить ⌘⏎</button>
+          </div>
+          <div id="sql-result"></div>
+        </div>
+      </section>
+    </main>
+    <div id="tooltip" hidden></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

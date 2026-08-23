@@ -48,6 +48,23 @@ async fn main() -> Result<()> {
         Some(host) => AppState::with_public_host(host.clone())?,
         None => AppState::new()?,
     };
+    // Profiling build: one DuckDB file per run. `--profile-dir <dir>` or
+    // SHARARAM_PROFILE_DIR chooses where; the default is ./profiles.
+    let profiler = if cfg!(feature = "profiler") {
+        let directory = args
+            .windows(2)
+            .find(|pair| pair[0] == "--profile-dir")
+            .map(|pair| std::path::PathBuf::from(&pair[1]))
+            .or_else(|| std::env::var_os("SHARARAM_PROFILE_DIR").map(Into::into));
+        let profiler = shararam_ruffle::profiler::Profiler::start(directory)?;
+        if let Some(path) = profiler.path() {
+            println!("Profiling to {}", path.display());
+        }
+        profiler
+    } else {
+        shararam_ruffle::profiler::Profiler::default()
+    };
+    let state = state.with_profiler(profiler.clone());
     #[cfg(debug_assertions)]
     let state = match std::env::var("SHARARAM_E2E_OFFICIAL_ORIGIN") {
         Ok(origin) if !origin.is_empty() => {
@@ -75,13 +92,54 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "desktop")]
     if !args.iter().any(|arg| arg == "--serve") {
-        return shararam_ruffle::desktop::run(&url, server);
+        // Ctrl-C / SIGTERM cannot reach the Tauri run loop, so flush the
+        // profile here and exit; normal window close goes through
+        // `RunEvent::Exit` inside `desktop::run`.
+        let signal_profiler = profiler.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            signal_profiler.finish();
+            std::process::exit(0);
+        });
+        let result = shararam_ruffle::desktop::run(&url, server, profiler.clone());
+        profiler.finish();
+        return result;
     }
 
     println!("Shararam Ruffle: {url}");
     if !args.iter().any(|arg| arg == "--no-open") {
         let _ = webbrowser::open(&url);
     }
-    server.await??;
+    // Ctrl-C or SIGTERM ends a `--serve` session; the profiling build
+    // finalises the profile file before exiting.
+    tokio::select! {
+        result = server => result??,
+        _ = shutdown_signal() => {
+            println!("Shutting down");
+        }
+    }
+    profiler.finish();
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

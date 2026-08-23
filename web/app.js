@@ -8,9 +8,15 @@
   const injected = document.querySelector('meta[name="shararam-cap"]')?.content;
   const injectedCap = injected && injected !== "__SHARARAM_CAP__" ? injected : null;
   const capability = query.get("cap") || injectedCap || sessionStorage.getItem("shararam-live-capability");
+  const profilerBuild = document.querySelector('meta[name="shararam-profiler"]')?.content === "1";
   const debugMode = query.get("debug") === "1";
+  // Profiling/automation aid: skip the in-game server picker and let the
+  // original client auto-select a server (so a profiling run can reach a
+  // location and its RTMP traffic without a human clicking the dialog).
+  const autoServer = query.get("autoserver") === "1";
   if (capability) sessionStorage.setItem("shararam-live-capability", capability);
-  history.replaceState(null, "", `${location.pathname}${debugMode ? "?debug=1" : ""}`);
+  const preservedQuery = [debugMode ? "debug=1" : "", autoServer ? "autoserver=1" : ""].filter(Boolean).join("&");
+  history.replaceState(null, "", `${location.pathname}${preservedQuery ? `?${preservedQuery}` : ""}`);
   window.__shararamCapability = capability;
 
   const login = document.getElementById("login");
@@ -101,8 +107,17 @@
       allowNetworking: "all",
       autoplay: "on",
       unmuteOverlay: "hidden",
+      // Profiling sessions keep running while the window is hidden (Ruffle
+      // ticks from a Worker), so a minimized/backgrounded run still records
+      // a complete picture.
+      ...(profilerBuild ? { backgroundExecutionMode: "mainThread" } : {}),
     });
     ruffleState.mounted = true;
+    if (profilerBuild && document.hidden) {
+      // The visibility handler only reacts to changes; kick it once if the
+      // page started out hidden (automation, minimized window).
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
   }
 
   if (debugMode) {
@@ -162,7 +177,7 @@
           portal_url: localOfficial,
           // PerformServerSelection in base.swf: any truthy value opens the
           // game's own server-selection dialog instead of AutoServerSelector.
-          manual_server_selection: "1",
+          manual_server_selection: autoServer ? "" : "1",
         }
       });
       loading.hidden = true;
@@ -210,4 +225,12 @@
   window.GetShararamCard = () => window.open("https://www.shararam.ru/cards", "_blank");
   window.GetApp = () => window.open("https://www.shararam.ru/getapp", "_blank");
   window.OpenUserAgreement = () => window.open("https://www.shararam.ru/eula", "_blank");
+
+  // Profiling builds mark the page; the collector wraps the callbacks above,
+  // so it is loaded last. Regular builds never load it.
+  if (profilerBuild) {
+    const script = document.createElement("script");
+    script.src = "/profiler.js";
+    document.head.appendChild(script);
+  }
 })();

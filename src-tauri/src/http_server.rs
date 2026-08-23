@@ -1,5 +1,6 @@
 use crate::{
     auth::{LoginRequest, LoginResult, OFFICIAL_ORIGIN, OfficialSession},
+    profiler,
     state::{AppState, CachedBase},
     tunnel::{self, TunnelQuery},
 };
@@ -30,9 +31,19 @@ use uuid::Uuid;
 #[folder = "../web/"]
 struct WebAssets;
 
+/// The profiler-instrumented Ruffle build (`shararam_profiler` feature of the
+/// fork). Served at `/ruffle/` by profiling builds instead of `web/ruffle/`.
+#[cfg(feature = "profiler")]
+#[derive(RustEmbed)]
+#[folder = "../web-profiler/"]
+struct ProfilerAssets;
+
 /// Replaced in the served `index.html` with the current capability token so the
 /// page carries it without exposing it in the URL. See [`static_response`].
 const CAPABILITY_PLACEHOLDER: &str = "__SHARARAM_CAP__";
+/// Replaced in the served `index.html` with `1` when this is a profiling
+/// build, so the page loads `profiler.js`.
+const PROFILER_PLACEHOLDER: &str = "__SHARARAM_PROFILER__";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -42,6 +53,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/shared-object", get(shared_object))
         .route("/api/status", get(status))
+        .route("/api/profiler/info", get(profiler_info))
+        .route("/api/profiler/events", post(profiler_events))
         .route("/game/base.swf", get(official_base))
         .route("/socket-proxy", get(socket_proxy))
         .route("/official/{*path}", any(official_proxy))
@@ -95,13 +108,17 @@ async fn static_asset(State(state): State<AppState>, Path(path): Path<String>) -
 }
 
 fn static_response(path: &str, inject_capability: Option<&str>) -> Response {
-    match WebAssets::get(path) {
+    match embedded_asset(path) {
         Some(asset) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             let body = match inject_capability {
                 Some(capability) => Body::from(
                     String::from_utf8_lossy(&asset.data)
                         .replace(CAPABILITY_PLACEHOLDER, capability)
+                        .replace(
+                            PROFILER_PLACEHOLDER,
+                            if cfg!(feature = "profiler") { "1" } else { "0" },
+                        )
                         .into_bytes(),
                 ),
                 None => Body::from(asset.data.into_owned()),
@@ -120,6 +137,52 @@ fn static_response(path: &str, inject_capability: Option<&str>) -> Response {
             response
         }
         None => (StatusCode::NOT_FOUND, "Not found").into_response(),
+    }
+}
+
+/// Profiling builds serve their own Ruffle bundle from `web-profiler/`; every
+/// other file comes from `web/`.
+fn embedded_asset(path: &str) -> Option<rust_embed::EmbeddedFile> {
+    #[cfg(feature = "profiler")]
+    if let Some(asset) = ProfilerAssets::get(path) {
+        return Some(asset);
+    }
+    WebAssets::get(path)
+}
+
+async fn profiler_info(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !valid_capability_header(&state, &headers) {
+        return forbidden();
+    }
+    axum::Json(json!({
+        "enabled": state.profiler.enabled(),
+        "path": state.profiler.path().map(|path| path.display().to_string()),
+    }))
+    .into_response()
+}
+
+/// Receives event batches from `web/profiler.js`. `navigator.sendBeacon`
+/// cannot set headers, so the capability may also arrive as `?cap=`.
+async fn profiler_events(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query_capability = query.get("cap").map(String::as_str) == Some(state.capability());
+    if !(valid_capability_header(&state, &headers) || query_capability) {
+        return forbidden();
+    }
+    if !state.profiler.enabled() {
+        return (StatusCode::NOT_FOUND, "Not a profiling build").into_response();
+    }
+    match state.profiler.ingest_browser_batch(&body) {
+        Ok(stored) => axum::Json(json!({"stored": stored})).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -456,8 +519,19 @@ async fn official_base(State(state): State<AppState>, headers: HeaderMap) -> Res
             bytes = cached.bytes.len(),
             "serving cached current base"
         );
+        state.profiler.event(
+            "http",
+            "base_swf",
+            profiler::now_us(),
+            0,
+            Some(format!(
+                "{{\"cached\":true,\"bytes\":{}}}",
+                cached.bytes.len()
+            )),
+        );
         return swf_response(cached);
     }
+    let fetch_started = profiler::now_us();
     let official = match session
         .client
         .get(format!("{OFFICIAL_ORIGIN}/base.swf"))
@@ -484,6 +558,16 @@ async fn official_base(State(state): State<AppState>, headers: HeaderMap) -> Res
         "cached byte-identical current base"
     );
     *state.official_base.write().await = Some(cached.clone());
+    state.profiler.event(
+        "http",
+        "base_swf",
+        fetch_started,
+        profiler::now_us() - fetch_started,
+        Some(format!(
+            "{{\"cached\":false,\"bytes\":{}}}",
+            cached.bytes.len()
+        )),
+    );
     swf_response(cached)
 }
 
@@ -544,9 +628,10 @@ async fn socket_proxy(
     }
     tracing::info!(host = %query.host, port = query.port, "opaque socket tunnel accepted");
     let diagnostics = state.diagnostics.clone();
+    let profiler = state.profiler.clone();
     let tunnel_active = session.tunnel_active.clone();
     ws.on_upgrade(move |socket| async move {
-        tunnel::run(socket, endpoint, diagnostics).await;
+        tunnel::run(socket, endpoint, diagnostics, profiler).await;
         tunnel_active.store(false, Ordering::Release);
     })
 }
@@ -559,6 +644,8 @@ async fn official_proxy(
     let method = request.method().clone();
     state.diagnostics.write().await.proxy_requests += 1;
     tracing::debug!(method = %method, path = %path, "official proxy request");
+    let proxy_started = profiler::now_us();
+    let proxy_query = request.uri().query().map(str::to_owned);
     if request.method() != Method::GET
         && request.method() != Method::HEAD
         && !valid_origin(&state, request.headers())
@@ -622,18 +709,51 @@ async fn official_proxy(
     }
     let upstream = match upstream.send().await {
         Ok(response) => response,
-        Err(error) => return internal(error),
+        Err(error) => {
+            state.profiler.event(
+                "http",
+                "proxy",
+                proxy_started,
+                profiler::now_us() - proxy_started,
+                Some(proxy_args(
+                    &method,
+                    &path,
+                    proxy_query.as_deref(),
+                    0,
+                    0,
+                    0,
+                    Some(&error.to_string()),
+                )),
+            );
+            return internal(error);
+        }
     };
     let status = match StatusCode::from_u16(upstream.status().as_u16()) {
         Ok(status) => status,
         Err(error) => return internal(error),
     };
+    let headers_at = profiler::now_us();
     let response_headers = official_response_headers(upstream.headers());
     if path.eq_ignore_ascii_case("async/ServerAction") {
         let bytes = match upstream.bytes().await {
             Ok(bytes) => bytes,
             Err(error) => return internal(error),
         };
+        state.profiler.event(
+            "http",
+            "proxy",
+            proxy_started,
+            profiler::now_us() - proxy_started,
+            Some(proxy_args(
+                &method,
+                &path,
+                proxy_query.as_deref(),
+                status.as_u16(),
+                bytes.len(),
+                headers_at - proxy_started,
+                None,
+            )),
+        );
         if let Ok(xml) = std::str::from_utf8(&bytes) {
             session.remember_servers(xml).await;
         }
@@ -656,7 +776,109 @@ async fn official_proxy(
         "official proxy response headers"
     );
     let body = streaming_proxy_body(upstream.bytes_stream());
+    let body = if state.profiler.enabled() {
+        // The event is recorded once the whole body has streamed to the page,
+        // so that `dur_us` covers the full transfer and `bytes` is exact.
+        let profiler = state.profiler.clone();
+        let status = status.as_u16();
+        let method = method.clone();
+        let path = path.clone();
+        Body::from_stream(ProfiledStream {
+            inner: Box::pin(body.into_data_stream()),
+            bytes: 0,
+            on_end: Some(Box::new(move |bytes, error| {
+                profiler.event(
+                    "http",
+                    "proxy",
+                    proxy_started,
+                    profiler::now_us() - proxy_started,
+                    Some(proxy_args(
+                        &method,
+                        &path,
+                        proxy_query.as_deref(),
+                        status,
+                        bytes,
+                        headers_at - proxy_started,
+                        error.as_deref(),
+                    )),
+                );
+            })),
+        })
+    } else {
+        body
+    };
     proxy_response(status, &response_headers, body)
+}
+
+fn proxy_args(
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    status: u16,
+    bytes: usize,
+    headers_us: i64,
+    error: Option<&str>,
+) -> String {
+    let mut args = json!({
+        "method": method.as_str(),
+        "path": path,
+        "status": status,
+        "bytes": bytes,
+        "headers_ms": headers_us as f64 / 1000.0,
+    });
+    if let Some(query) = query {
+        args["query"] = json!(query);
+    }
+    if let Some(error) = error {
+        args["error"] = json!(error);
+    }
+    args.to_string()
+}
+
+type StreamEndCallback = Box<dyn FnOnce(usize, Option<String>) + Send>;
+
+/// Counts the bytes of a streamed proxy body and reports once the stream
+/// ends (or fails).
+struct ProfiledStream {
+    inner: std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    bytes: usize,
+    on_end: Option<StreamEndCallback>,
+}
+
+impl Stream for ProfiledStream {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let polled = self.inner.as_mut().poll_next(cx);
+        match &polled {
+            std::task::Poll::Ready(Some(Ok(chunk))) => self.bytes += chunk.len(),
+            std::task::Poll::Ready(Some(Err(error))) => {
+                let message = error.to_string();
+                if let Some(on_end) = self.on_end.take() {
+                    on_end(self.bytes, Some(message));
+                }
+            }
+            std::task::Poll::Ready(None) => {
+                if let Some(on_end) = self.on_end.take() {
+                    on_end(self.bytes, None);
+                }
+            }
+            std::task::Poll::Pending => {}
+        }
+        polled
+    }
+}
+
+impl Drop for ProfiledStream {
+    fn drop(&mut self) {
+        // The page gave up on the response before the end of the body.
+        if let Some(on_end) = self.on_end.take() {
+            on_end(self.bytes, Some("aborted".to_string()));
+        }
+    }
 }
 
 fn streaming_proxy_body<S, E>(upstream: S) -> Body
@@ -971,7 +1193,7 @@ mod tests {
         assert!(source.contains("game_server: localOfficial"));
         assert!(source.contains("url_path_server: localOfficial"));
         assert!(source.contains("portal_url: localOfficial"));
-        assert!(source.contains("manual_server_selection: \"1\""));
+        assert!(source.contains("manual_server_selection: autoServer ? \"\" : \"1\""));
     }
 
     #[test]

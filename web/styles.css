@@ -29,4 +29,5 @@ button:disabled { opacity: .6; cursor: wait; }
 #game-shell { background: #def1f5 url("/shgrd.png") center / 100% 100% no-repeat; }
 #game { display: grid; place-items: center; }
 ruffle-player { display: block; width: 100%; height: 100%; }
+#profiler-badge { position: fixed; z-index: 20; left: 8px; top: 8px; max-width: calc(100% - 16px); padding: 4px 9px; border-radius: 7px; background: #7a1d1dd9; color: #ffd9d9; font: 11px/1.35 Consolas, monospace; overflow-wrap: anywhere; pointer-events: none; }
 #debug-state { position: fixed; z-index: 20; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 7px 10px; border-radius: 7px; background: #061b25d9; color: #9ff0a8; font: 12px/1.35 Consolas, monospace; overflow-wrap: anywhere; pointer-events: none; }

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("help", "check", "server", "exe", "all", "release", "clean")]
+    [ValidateSet("help", "check", "server", "exe", "profiler", "all", "release", "clean")]
     [string]$Target = "help"
 )
 
@@ -104,11 +104,22 @@ function Build-Desktop {
         -Features @("--features", "desktop")
 }
 
+# The profiling build: same desktop app plus the "profiler" feature, which
+# records every session into a DuckDB file (see PROFILING.md). It embeds the
+# profiler-instrumented Ruffle from web-profiler/, so it is built into its
+# own Cargo target directory to keep caches separate.
+function Build-Profiler {
+    Build-Artifact `
+        -Name "Shararam-Ruffle-Profiler.exe" `
+        -TargetDirectory (Join-Path $TargetRoot "profiler") `
+        -Features @("--features", "desktop,profiler")
+}
+
 function Remove-BuildOutputs {
     if (Test-Path -LiteralPath $Dist) {
         Remove-Item -LiteralPath $Dist -Recurse -Force
     }
-    foreach ($name in @("release", "check", "server", "desktop", "check-desktop")) {
+    foreach ($name in @("release", "check", "server", "desktop", "check-desktop", "profiler")) {
         $path = [IO.Path]::GetFullPath((Join-Path $TargetRoot $name))
         $expectedParent = [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\') + '\'
         if (-not $path.StartsWith($expectedParent, [StringComparison]::OrdinalIgnoreCase)) {
@@ -126,6 +137,7 @@ switch ($Target) {
         Write-Host @"
 make server   Build dist\Shararam-Ruffle-Server.exe (browser + local web server)
 make exe      Build dist\Shararam-Ruffle.exe (single desktop executable)
+make profiler Build dist\Shararam-Ruffle-Profiler.exe (records sessions to DuckDB)
 make all      Build both release artifacts
 make check    Run format, tests, and Clippy for both feature sets
 make release  Run checks and build both release artifacts
@@ -138,6 +150,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 <target>
     "check" { Invoke-Checks }
     "server" { Build-Server }
     "exe" { Build-Desktop }
+    "profiler" { Build-Profiler }
     "all" { Build-Server; Build-Desktop }
     "release" { Invoke-Checks; Build-Server; Build-Desktop }
     "clean" { Remove-BuildOutputs }
