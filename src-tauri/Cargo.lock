@@ -3798,6 +3798,7 @@ dependencies = [
  "axum",
  "brotli",
  "duckdb",
+ "flate2",
  "futures-util",
  "hex",
  "md5",

@@ -26,6 +26,7 @@ profiler = ["dep:duckdb", "serde_json/raw_value"]
 
 [dependencies]
 anyhow = "1"
+flate2 = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 futures-util = "0.3"
 hex = "0.4"

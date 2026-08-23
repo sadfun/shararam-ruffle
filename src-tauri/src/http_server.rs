@@ -2,6 +2,7 @@ use crate::{
     auth::{LoginRequest, LoginResult, OFFICIAL_ORIGIN, OfficialSession},
     profiler,
     state::{AppState, CachedBase},
+    swf_patch,
     tunnel::{self, TunnelQuery},
 };
 use anyhow::Context;
@@ -551,7 +552,9 @@ async fn official_base(State(state): State<AppState>, headers: HeaderMap) -> Res
     let cached = CachedBase {
         sha256,
         bytes: Arc::new(official.to_vec()),
+        patched: None,
     };
+    let cached = attach_patched_base(&state, cached).await;
     tracing::info!(
         sha256 = %cached.sha256,
         bytes = cached.bytes.len(),
@@ -572,8 +575,18 @@ async fn official_base(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 fn swf_response(cached: CachedBase) -> Response {
-    let mut response = Body::from(cached.bytes.as_ref().clone()).into_response();
+    let (body, patched) = match &cached.patched {
+        Some(bytes) => (bytes.as_ref().clone(), true),
+        None => (cached.bytes.as_ref().clone(), false),
+    };
+    let mut response = Body::from(body).into_response();
     let headers = response.headers_mut();
+    if patched {
+        headers.insert(
+            "x-shararam-swf-patched",
+            HeaderValue::from_static("filters-stripped"),
+        );
+    }
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/x-shockwave-flash"),
@@ -584,6 +597,61 @@ fn swf_response(cached: CachedBase) -> Response {
         HeaderValue::from_str(&cached.sha256).unwrap(),
     );
     response
+}
+
+/// Runs the in-flight SWF patcher (see `swf_patch`) over a freshly fetched
+/// base.swf and stores the result alongside the byte-identical original.
+async fn attach_patched_base(state: &AppState, mut cached: CachedBase) -> CachedBase {
+    if !swf_patch::enabled() {
+        return cached;
+    }
+    let bytes = cached.bytes.clone();
+    let started = profiler::now_us();
+    match tokio::task::spawn_blocking(move || swf_patch::patch_swf(&bytes)).await {
+        Ok(Some((patched, stats))) => {
+            tracing::info!(
+                original = cached.bytes.len(),
+                patched = patched.len(),
+                stats = %stats.summary(),
+                "patched base.swf in-flight"
+            );
+            state.profiler.event(
+                "patch",
+                "swf",
+                started,
+                profiler::now_us() - started,
+                Some(swf_patch_args(
+                    "base.swf",
+                    cached.bytes.len(),
+                    patched.len(),
+                    &stats,
+                )),
+            );
+            cached.patched = Some(Arc::new(patched));
+        }
+        Ok(None) => tracing::info!("base.swf needed no patching"),
+        Err(error) => tracing::warn!(%error, "base.swf patch task failed"),
+    }
+    cached
+}
+
+fn swf_patch_args(
+    url: &str,
+    in_bytes: usize,
+    out_bytes: usize,
+    stats: &swf_patch::PatchStats,
+) -> String {
+    json!({
+        "url": url,
+        "in_bytes": in_bytes,
+        "out_bytes": out_bytes,
+        "filter_lists": stats.filter_lists,
+        "filters": stats.filters,
+        "cache_flags": stats.cache_flags,
+        "renames": stats.renames,
+        "skipped_tags": stats.skipped_tags,
+    })
+    .to_string()
 }
 
 async fn socket_proxy(
@@ -775,6 +843,27 @@ async fn official_proxy(
         status = %status,
         "official proxy response headers"
     );
+    if swf_patch::enabled()
+        && method == Method::GET
+        && status == StatusCode::OK
+        && path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".swf"))
+    {
+        return patched_swf_proxy_response(
+            &state,
+            upstream,
+            status,
+            response_headers,
+            &method,
+            &path,
+            proxy_query.as_deref(),
+            proxy_started,
+            headers_at,
+        )
+        .await;
+    }
     let body = streaming_proxy_body(upstream.bytes_stream());
     let body = if state.profiler.enabled() {
         // The event is recorded once the whole body has streamed to the page,
@@ -808,6 +897,91 @@ async fn official_proxy(
         body
     };
     proxy_response(status, &response_headers, body)
+}
+
+/// Buffers a `.swf` proxy response, patches it (see `swf_patch`) and serves
+/// the result. Falls back to the original bytes whenever nothing changed or
+/// the patcher declined the file.
+#[expect(clippy::too_many_arguments)]
+async fn patched_swf_proxy_response(
+    state: &AppState,
+    upstream: wreq_transport::Response,
+    status: StatusCode,
+    mut response_headers: HeaderMap,
+    method: &Method,
+    path: &str,
+    proxy_query: Option<&str>,
+    proxy_started: i64,
+    headers_at: i64,
+) -> Response {
+    let bytes = match upstream.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            state.profiler.event(
+                "http",
+                "proxy",
+                proxy_started,
+                profiler::now_us() - proxy_started,
+                Some(proxy_args(
+                    method,
+                    path,
+                    proxy_query,
+                    status.as_u16(),
+                    0,
+                    headers_at - proxy_started,
+                    Some(&error.to_string()),
+                )),
+            );
+            return internal(error);
+        }
+    };
+    state.profiler.event(
+        "http",
+        "proxy",
+        proxy_started,
+        profiler::now_us() - proxy_started,
+        Some(proxy_args(
+            method,
+            path,
+            proxy_query,
+            status.as_u16(),
+            bytes.len(),
+            headers_at - proxy_started,
+            None,
+        )),
+    );
+    let patch_started = profiler::now_us();
+    let input = bytes.clone();
+    match tokio::task::spawn_blocking(move || swf_patch::patch_swf(&input)).await {
+        Ok(Some((patched, stats))) => {
+            tracing::info!(
+                path,
+                original = bytes.len(),
+                patched = patched.len(),
+                stats = %stats.summary(),
+                "patched swf in-flight"
+            );
+            state.profiler.event(
+                "patch",
+                "swf",
+                patch_started,
+                profiler::now_us() - patch_started,
+                Some(swf_patch_args(path, bytes.len(), patched.len(), &stats)),
+            );
+            // The body changed size; the copied upstream length is now wrong.
+            response_headers.remove(header::CONTENT_LENGTH);
+            response_headers.insert(
+                "x-shararam-swf-patched",
+                HeaderValue::from_static("filters-stripped"),
+            );
+            proxy_response(status, &response_headers, Body::from(patched))
+        }
+        Ok(None) => proxy_response(status, &response_headers, Body::from(bytes)),
+        Err(error) => {
+            tracing::warn!(%error, path, "swf patch task failed; serving original");
+            proxy_response(status, &response_headers, Body::from(bytes))
+        }
+    }
 }
 
 fn proxy_args(

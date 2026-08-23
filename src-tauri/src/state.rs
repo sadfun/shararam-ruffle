@@ -40,6 +40,10 @@ pub struct Diagnostics {
 pub struct CachedBase {
     pub bytes: Arc<Vec<u8>>,
     pub sha256: String,
+    /// base.swf with filters/cacheAsBitmap stripped (see `swf_patch`),
+    /// computed once when the original is cached. `None` when patching is
+    /// disabled or nothing needed changing.
+    pub patched: Option<Arc<Vec<u8>>>,
 }
 
 impl AppState {
