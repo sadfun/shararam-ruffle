@@ -28,14 +28,18 @@
 use std::io::{Read, Write};
 use std::sync::OnceLock;
 
-/// Kill switch: `SHARARAM_SWF_PATCH=0` (or `false`/`off`/`no`) serves
-/// original bytes. Patching is on by default in this build.
+/// Opt-in switch: `SHARARAM_SWF_PATCH=1` strips filters/cacheAsBitmap
+/// in-flight. Off by default: with Layer groups now rendered inline by the
+/// Ruffle fork, filter-driven bitmap caching is a net win again — cached
+/// avatars draw as a few quads instead of ~100 re-filled vector shapes per
+/// frame, and the glow/shadow art comes back. The strip stays available for
+/// A/B runs.
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        !matches!(
+        matches!(
             std::env::var("SHARARAM_SWF_PATCH").as_deref(),
-            Ok("0") | Ok("false") | Ok("off") | Ok("no")
+            Ok("1") | Ok("true") | Ok("on") | Ok("yes")
         )
     })
 }

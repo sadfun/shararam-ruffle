@@ -20,6 +20,8 @@ pub struct AppState {
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Profiling session (a no-op shell unless built with `--features profiler`).
     pub profiler: Profiler,
+    /// Persistent disk cache for immutable `/fs/` game assets.
+    pub asset_cache: Arc<crate::asset_cache::AssetCache>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -59,6 +61,7 @@ impl AppState {
             official_base: Default::default(),
             diagnostics: Default::default(),
             profiler: Profiler::default(),
+            asset_cache: Arc::new(crate::asset_cache::AssetCache::new()),
         })
     }
 

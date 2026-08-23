@@ -47,6 +47,7 @@ const CAPABILITY_PLACEHOLDER: &str = "__SHARARAM_CAP__";
 const PROFILER_PLACEHOLDER: &str = "__SHARARAM_PROFILER__";
 
 pub fn router(state: AppState) -> Router {
+    state.asset_cache.spawn_trim();
     Router::new()
         .route("/", get(static_index))
         .route("/api/login", post(login))
@@ -727,6 +728,29 @@ async fn official_proxy(
     if path.contains("..") || path.starts_with('/') {
         return forbidden();
     }
+    // Immutable content-addressed game assets are served from the local disk
+    // cache when possible; everything else always goes upstream.
+    let is_asset = method == Method::GET
+        && path.starts_with("fs/")
+        && request.headers().get(header::RANGE).is_none()
+        && state.asset_cache.enabled();
+    if is_asset
+        && let Some((body, content_type)) =
+            state.asset_cache.get(&path, proxy_query.as_deref()).await
+    {
+        state.profiler.event(
+            "http",
+            "asset_cache",
+            proxy_started,
+            profiler::now_us() - proxy_started,
+            Some(format!(
+                "{{\"path\":{},\"bytes\":{}}}",
+                serde_json::json!(path),
+                body.len()
+            )),
+        );
+        return asset_response(&path, body, content_type);
+    }
     let query = request
         .uri()
         .query()
@@ -843,15 +867,16 @@ async fn official_proxy(
         status = %status,
         "official proxy response headers"
     );
-    if swf_patch::enabled()
+    let is_swf = path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".swf"));
+    let cacheable = is_asset && status == StatusCode::OK;
+    if (cacheable || (swf_patch::enabled() && is_swf))
         && method == Method::GET
         && status == StatusCode::OK
-        && path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".swf"))
     {
-        return patched_swf_proxy_response(
+        return buffered_proxy_response(
             &state,
             upstream,
             status,
@@ -861,6 +886,8 @@ async fn official_proxy(
             proxy_query.as_deref(),
             proxy_started,
             headers_at,
+            cacheable,
+            is_swf,
         )
         .await;
     }
@@ -899,11 +926,11 @@ async fn official_proxy(
     proxy_response(status, &response_headers, body)
 }
 
-/// Buffers a `.swf` proxy response, patches it (see `swf_patch`) and serves
-/// the result. Falls back to the original bytes whenever nothing changed or
-/// the patcher declined the file.
+/// Buffers a proxy response so it can be stored in the asset cache and/or
+/// patched (see `swf_patch`) before serving. Falls back to the original
+/// bytes whenever nothing changed or the patcher declined the file.
 #[expect(clippy::too_many_arguments)]
-async fn patched_swf_proxy_response(
+async fn buffered_proxy_response(
     state: &AppState,
     upstream: wreq_transport::Response,
     status: StatusCode,
@@ -913,6 +940,8 @@ async fn patched_swf_proxy_response(
     proxy_query: Option<&str>,
     proxy_started: i64,
     headers_at: i64,
+    cacheable: bool,
+    is_swf: bool,
 ) -> Response {
     let bytes = match upstream.bytes().await {
         Ok(bytes) => bytes,
@@ -950,6 +979,29 @@ async fn patched_swf_proxy_response(
             None,
         )),
     );
+    if cacheable && bytes.len() <= crate::asset_cache::MAX_BODY_BYTES {
+        let cache = state.asset_cache.clone();
+        let cache_path = path.to_owned();
+        let cache_query = proxy_query.map(str::to_owned);
+        let content_type = response_headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = bytes.clone();
+        tokio::spawn(async move {
+            cache
+                .put(
+                    &cache_path,
+                    cache_query.as_deref(),
+                    content_type.as_deref(),
+                    &body,
+                )
+                .await;
+        });
+    }
+    if !(is_swf && swf_patch::enabled()) {
+        return proxy_response(status, &response_headers, Body::from(bytes));
+    }
     let patch_started = profiler::now_us();
     let input = bytes.clone();
     match tokio::task::spawn_blocking(move || swf_patch::patch_swf(&input)).await {
@@ -982,6 +1034,49 @@ async fn patched_swf_proxy_response(
             proxy_response(status, &response_headers, Body::from(bytes))
         }
     }
+}
+
+/// Serves a disk-cache hit for an immutable `/fs/` asset. SWF patching, when
+/// enabled, is applied to the cached original on the way out.
+fn asset_response(path: &str, body: Vec<u8>, content_type: Option<String>) -> Response {
+    let is_swf = path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".swf"));
+    let (body, patched) = if is_swf && swf_patch::enabled() {
+        match swf_patch::patch_swf(&body) {
+            Some((patched, _)) => (patched, true),
+            None => (body, false),
+        }
+    } else {
+        (body, false)
+    };
+    let mut response = Body::from(body).into_response();
+    let headers = response.headers_mut();
+    let content_type = content_type
+        .and_then(|value| HeaderValue::from_str(&value).ok())
+        .unwrap_or_else(|| {
+            HeaderValue::from_str(
+                mime_guess::from_path(path)
+                    .first_or_octet_stream()
+                    .essence_str(),
+            )
+            .unwrap()
+        });
+    headers.insert(header::CONTENT_TYPE, content_type);
+    // Content-addressed files: let the WebView cache them hard too.
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    headers.insert("x-shararam-asset-cache", HeaderValue::from_static("hit"));
+    if patched {
+        headers.insert(
+            "x-shararam-swf-patched",
+            HeaderValue::from_static("filters-stripped"),
+        );
+    }
+    response
 }
 
 fn proxy_args(
