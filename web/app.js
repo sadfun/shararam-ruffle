@@ -14,8 +14,24 @@
   // original client auto-select a server (so a profiling run can reach a
   // location and its RTMP traffic without a human clicking the dialog).
   const autoServer = query.get("autoserver") === "1";
+  // GPU-load experiments: ?quality=low|medium|high|best maps to Stage.quality
+  // (anti-aliasing cost), ?dpr=1 renders at CSS pixels instead of the Retina
+  // ratio (4x fewer pixels on a 2x display).
+  const quality = query.get("quality") || "";
+  const forceDpr = query.get("dpr") || "";
   if (capability) sessionStorage.setItem("shararam-live-capability", capability);
-  const preservedQuery = [debugMode ? "debug=1" : "", autoServer ? "autoserver=1" : ""].filter(Boolean).join("&");
+  const preservedQuery = [
+    debugMode ? "debug=1" : "",
+    autoServer ? "autoserver=1" : "",
+    quality ? `quality=${encodeURIComponent(quality)}` : "",
+    forceDpr ? `dpr=${encodeURIComponent(forceDpr)}` : "",
+  ].filter(Boolean).join("&");
+  if (forceDpr) {
+    const value = Number(forceDpr);
+    if (Number.isFinite(value) && value > 0) {
+      Object.defineProperty(window, "devicePixelRatio", { value, configurable: true });
+    }
+  }
   history.replaceState(null, "", `${location.pathname}${preservedQuery ? `?${preservedQuery}` : ""}`);
   window.__shararamCapability = capability;
 
@@ -111,6 +127,7 @@
       // ticks from a Worker), so a minimized/backgrounded run still records
       // a complete picture.
       ...(profilerBuild ? { backgroundExecutionMode: "mainThread" } : {}),
+      ...(quality ? { quality } : {}),
     });
     ruffleState.mounted = true;
     if (profilerBuild && document.hidden) {
