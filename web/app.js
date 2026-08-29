@@ -99,6 +99,11 @@
       }],
       allowScriptAccess: true,
       allowNetworking: "all",
+      // Inline rendering of Layer blend groups (the big fps win in crowded
+      // locations). The server maps SHARARAM_LAYER_INLINE=0 onto this meta
+      // tag as a safety valve; the Ruffle option defaults to true anyway.
+      layerBlendInlining:
+        document.querySelector('meta[name="shararam-layer-inline"]')?.content !== "0",
       autoplay: "on",
       unmuteOverlay: "hidden",
     });

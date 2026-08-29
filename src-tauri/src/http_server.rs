@@ -33,6 +33,23 @@ struct WebAssets;
 /// Replaced in the served `index.html` with the current capability token so the
 /// page carries it without exposing it in the URL. See [`static_response`].
 const CAPABILITY_PLACEHOLDER: &str = "__SHARARAM_CAP__";
+const LAYER_INLINE_PLACEHOLDER: &str = "__SHARARAM_LAYER_INLINE__";
+
+/// `SHARARAM_LAYER_INLINE=0` turns off inline rendering of Layer blend
+/// groups in the bundled Ruffle (a safety valve; on by default).
+fn layer_inline_enabled() -> &'static str {
+    static VALUE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        if matches!(
+            std::env::var("SHARARAM_LAYER_INLINE").as_deref(),
+            Ok("0") | Ok("false") | Ok("off") | Ok("no")
+        ) {
+            "0"
+        } else {
+            "1"
+        }
+    })
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -102,6 +119,7 @@ fn static_response(path: &str, inject_capability: Option<&str>) -> Response {
                 Some(capability) => Body::from(
                     String::from_utf8_lossy(&asset.data)
                         .replace(CAPABILITY_PLACEHOLDER, capability)
+                        .replace(LAYER_INLINE_PLACEHOLDER, layer_inline_enabled())
                         .into_bytes(),
                 ),
                 None => Body::from(asset.data.into_owned()),
@@ -820,6 +838,8 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains(&format!("content=\"{capability}\"")));
         assert!(!body.contains(CAPABILITY_PLACEHOLDER));
+        assert!(!body.contains(LAYER_INLINE_PLACEHOLDER));
+        assert!(body.contains(r#"<meta name="shararam-layer-inline" content="1">"#));
     }
 
     #[test]
