@@ -11,6 +11,7 @@ import {
   renderLoadsTab,
   renderSlowTab,
   renderFramesTab,
+  renderGpuTab,
   renderFrameDetails,
   renderDetails,
   runSql
@@ -255,6 +256,9 @@ async function openFile(file: File) {
       void selectFrame(index, true)
     );
     await Promise.all([
+      renderGpuTab(document.getElementById("gpu-table")!, model, index =>
+        void selectFrame(index, true)
+      ),
       renderRtmpTab(document.getElementById("rtmp-table")!, model.t0Us, selectEvent),
       renderLoadsTab(document.getElementById("loads-table")!, model.t0Us, selectEvent),
       renderSlowTab(document.getElementById("slow-table")!, model.t0Us, selectEvent)

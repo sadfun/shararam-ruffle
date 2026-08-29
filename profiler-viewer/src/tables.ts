@@ -372,6 +372,177 @@ export async function renderFrameDetails(
   container.appendChild(body);
 }
 
+// Counters carried by the instrumented build in the args of the last
+// render/submit_frame of each animation frame.
+const GPU_FEATURES: { key: string; label: string; src: "sa" | "ra" }[] = [
+  { key: "commands", label: "команды", src: "sa" },
+  { key: "shapes", label: "шейпы", src: "sa" },
+  { key: "bitmaps", label: "битмапы", src: "sa" },
+  { key: "rects", label: "прямоугольники", src: "sa" },
+  { key: "stencil_masks", label: "stencil-маски", src: "sa" },
+  { key: "alpha_masks", label: "alpha-маски", src: "sa" },
+  { key: "blend_layer", label: "layer-бленды", src: "sa" },
+  { key: "blend_complex", label: "сложные бленды", src: "sa" },
+  { key: "blend_shader", label: "shader-бленды", src: "sa" },
+  { key: "cache_commands", label: "cacheAsBitmap-команды", src: "sa" },
+  { key: "display_objects", label: "display objects", src: "ra" },
+  { key: "offscreen_renders", label: "оффскрин-рендеры", src: "ra" },
+  { key: "layer_blends_inlined", label: "инлайн-бленды", src: "ra" },
+  { key: "textures_updated", label: "обновления текстур", src: "ra" }
+];
+
+function frameIndexAt(model: ProfileModel, endMs: number): number {
+  const times = model.frameTimesMs;
+  let lo = 0;
+  let hi = times.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] < endMs - 0.5) lo = mid + 1;
+    else {
+      best = mid;
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * The "why is the GPU busy" view: joins each frame's measured GPU-queue
+ * latency (gpu/fence_wait) with the render-command mix of that frame, then
+ * shows which counters separate heavy frames from light ones. This is the
+ * workflow that found the filter problem, built in.
+ */
+export async function renderGpuTab(
+  container: HTMLElement,
+  model: ProfileModel,
+  onFrame: (frameIndex: number) => void
+) {
+  container.textContent = "";
+  const extracts = GPU_FEATURES.map(
+    f => `CAST(regexp_extract(${f.src}, '"${f.key}":([0-9]+)', 1) AS INT) AS "${f.key}"`
+  ).join(", ");
+  let rows;
+  try {
+    ({ rows } = await query(
+      `WITH fr AS (SELECT ts_us AS end_us, ts_us - CAST(dt_ms*1000 AS BIGINT) AS start_us, dt_ms
+          FROM frames WHERE dt_ms BETWEEN 5 AND 500),
+        g AS (SELECT f.end_us, f.dt_ms, max(e.dur_us)/1000.0 AS gpu_ms FROM fr f
+          JOIN events e ON e.cat = 'gpu' AND e.ts_us >= f.start_us AND e.ts_us < f.end_us
+          GROUP BY 1, 2),
+        s AS (SELECT f.end_us,
+          (SELECT e.args FROM events e WHERE e.name = 'submit_frame'
+             AND e.ts_us >= f.start_us AND e.ts_us < f.end_us ORDER BY e.ts_us DESC LIMIT 1) AS sa,
+          (SELECT e.args FROM events e WHERE e.cat = 'render' AND e.name = 'render'
+             AND e.ts_us >= f.start_us AND e.ts_us < f.end_us ORDER BY e.ts_us DESC LIMIT 1) AS ra
+          FROM fr f)
+        SELECT g.end_us, g.dt_ms, g.gpu_ms, ${extracts}
+        FROM g JOIN s USING (end_us) WHERE s.sa IS NOT NULL AND s.ra IS NOT NULL
+        ORDER BY g.end_us`
+    ));
+  } catch (error) {
+    container.appendChild(el("div", "details-empty", String(error)));
+    return;
+  }
+  if (!rows.length) {
+    container.appendChild(
+      el(
+        "div",
+        "details-empty",
+        "Нет данных gpu/fence_wait — профиль записан сборкой без GPU-датчика."
+      )
+    );
+    return;
+  }
+
+  const gpu = rows.map(row => toNumber(row["gpu_ms"]));
+  const sorted = [...gpu].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const buckets = (value: number) => (value <= 20 ? 0 : value <= 40 ? 1 : 2);
+  const bucketNames = ["≤20 мс", "20–40 мс", ">40 мс"];
+  const bucketCounts = [0, 0, 0];
+  for (const value of gpu) bucketCounts[buckets(value)]++;
+
+  container.appendChild(
+    el(
+      "div",
+      "frame-summary",
+      `кадров с GPU-меткой: ${rows.length} · медиана ожидания GPU ${formatMs(median)} · ` +
+        bucketNames.map((name, i) => `${name}: ${bucketCounts[i]}`).join(" · ")
+    )
+  );
+
+  // Per counter: averages inside each latency bucket + correlation with the
+  // latency itself. Latency includes queue backlog, so the mix comparison
+  // (what heavy frames contain more of) matters more than absolute ms.
+  const meanGpu = gpu.reduce((a, b) => a + b, 0) / gpu.length;
+  const statRows = GPU_FEATURES.map(feature => {
+    const values = rows.map(row => toNumber(row[feature.key]));
+    const bucketSum = [0, 0, 0];
+    for (let i = 0; i < values.length; i++) bucketSum[buckets(gpu[i])] += values[i];
+    const avg = bucketSum.map((sum, i) => (bucketCounts[i] ? sum / bucketCounts[i] : 0));
+    const meanValue = values.reduce((a, b) => a + b, 0) / values.length;
+    let cov = 0;
+    let varG = 0;
+    let varV = 0;
+    for (let i = 0; i < values.length; i++) {
+      const dg = gpu[i] - meanGpu;
+      const dv = values[i] - meanValue;
+      cov += dg * dv;
+      varG += dg * dg;
+      varV += dv * dv;
+    }
+    const corr = varG > 0 && varV > 0 ? cov / Math.sqrt(varG * varV) : 0;
+    const ratio = avg[0] > 0.05 ? avg[2] / avg[0] : avg[2] > 0.05 ? Infinity : NaN;
+    return { feature, avg, corr, ratio };
+  }).filter(stat => stat.avg.some(value => value > 0.01));
+  statRows.sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr));
+
+  renderTable(
+    container,
+    ["счётчик", "корр. с GPU", ...bucketNames.map(name => `сред. при ${name}`), "тяж./лёгк."],
+    statRows.map(stat => [
+      stat.feature.label,
+      stat.corr.toFixed(2),
+      ...stat.avg.map(value => (value >= 100 ? String(Math.round(value)) : value.toFixed(1))),
+      Number.isNaN(stat.ratio) ? "·" : stat.ratio === Infinity ? "∞" : `×${stat.ratio.toFixed(1)}`
+    ])
+  );
+  container.appendChild(
+    el(
+      "div",
+      "dim",
+      "Латентность fence включает накопленную очередь: смотрите, чего в тяжёлых кадрах больше, а не абсолютные мс."
+    )
+  );
+
+  const heavy = rows
+    .map((row, i) => ({ row, gpuMs: gpu[i] }))
+    .sort((a, b) => b.gpuMs - a.gpuMs)
+    .slice(0, 30);
+  container.appendChild(el("div", "frame-summary", "Самые тяжёлые для GPU кадры:"));
+  const heavyBody = el("div");
+  renderTable(
+    heavyBody,
+    ["t", "GPU", "кадр", "команды", "шейпы", "сложные бленды", "cacheAsBitmap", "оффскрин"],
+    heavy.map(({ row, gpuMs }) => [
+      formatClock((toNumber(row["end_us"]) - model.t0Us) / 1000),
+      formatMs(gpuMs),
+      formatMs(toNumber(row["dt_ms"])),
+      String(toNumber(row["commands"])),
+      String(toNumber(row["shapes"])),
+      String(toNumber(row["blend_complex"])),
+      String(toNumber(row["cache_commands"])),
+      String(toNumber(row["offscreen_renders"]))
+    ]),
+    rowIndex => {
+      const index = frameIndexAt(model, (toNumber(heavy[rowIndex].row["end_us"]) - model.t0Us) / 1000);
+      if (index >= 0) onFrame(index);
+    }
+  );
+  container.appendChild(heavyBody);
+}
+
 export async function runSql(container: HTMLElement, sql: string) {
   container.textContent = "";
   try {
