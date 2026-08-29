@@ -110,6 +110,23 @@
   window.addEventListener("pagehide", () => flush(true));
   window.addEventListener("beforeunload", () => flush(true));
 
+  // Main-thread stall detector. WKWebView has no Long Tasks API, so any
+  // main-thread blockage outside instrumented spans would be invisible in the
+  // profile. A 10ms heartbeat that arrives late means the thread was blocked
+  // for that long; the event covers the blocked span.
+  const HEARTBEAT_MS = 10;
+  let heartbeatLast = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const late = now - heartbeatLast - HEARTBEAT_MS;
+    heartbeatLast = now;
+    if (document.hidden) return; // background timers are throttled, not stalled
+    if (late > 20) event("browser", "stall", now - late, late);
+  }, HEARTBEAT_MS);
+  document.addEventListener("visibilitychange", () => {
+    heartbeatLast = performance.now();
+  });
+
   // Screen recording (?rec=1 or ?rec=<fps>): a low-rate filmstrip of the
   // game canvas stored into the profile next to the events, so the viewer
   // can show what was on screen at any point of the timeline. Frames go
@@ -130,34 +147,97 @@
     video.muted = true;
     video.playsInline = true;
     video.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none";
-    let uploading = false;
+    let busySince = 0;
     let frames = 0;
 
+    const upload = (blob, tsUs) => {
+      fetch(`/api/profiler/frame?ts_us=${tsUs}`, {
+        method: "POST",
+        headers: { "X-Shararam-Live-Capability": capability, "Content-Type": "image/jpeg" },
+        body: blob
+      })
+        .catch(() => {})
+        .finally(() => {
+          busySince = 0;
+          frames++;
+        });
+    };
+
+    // Scaling and JPEG encoding happen in a worker: doing them on the main
+    // thread (drawImage from the capture video + toBlob) blocked it for tens
+    // of milliseconds and dropped a frame on almost every capture.
+    const workerSource = `
+      let canvas = null, ctx = null;
+      onmessage = async ({ data }) => {
+        const { bitmap, tsUs, width, height, quality } = data;
+        try {
+          if (!canvas || canvas.width !== width || canvas.height !== height) {
+            canvas = new OffscreenCanvas(width, height);
+            ctx = canvas.getContext("2d");
+          }
+          ctx.drawImage(bitmap, 0, 0, width, height);
+          const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+          postMessage({ tsUs, blob });
+        } catch (error) {
+          postMessage({ tsUs, error: String(error) });
+        } finally {
+          bitmap.close();
+        }
+      };
+    `;
+    const canOffload =
+      typeof OffscreenCanvas !== "undefined" &&
+      typeof OffscreenCanvas.prototype.convertToBlob === "function" &&
+      typeof createImageBitmap === "function";
+    let worker = null;
+    if (canOffload) {
+      worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" })));
+      worker.onmessage = ({ data }) => {
+        if (data.error || !data.blob) {
+          busySince = 0;
+          return;
+        }
+        upload(data.blob, data.tsUs);
+      };
+      worker.onerror = () => {
+        busySince = 0;
+      };
+    }
+
     const captureOne = () => {
-      if (document.hidden || uploading || video.readyState < 2 || !video.videoWidth) return;
       const t = performance.now();
+      // A stuck pipeline (lost worker reply, hung upload) unlocks after 5s.
+      if (document.hidden || (busySince && t - busySince < 5000)) return;
+      if (video.readyState < 2 || !video.videoWidth) return;
       const scale = Math.min(MAX_DIM / video.videoWidth, MAX_DIM / video.videoHeight, 1);
       const width = Math.max(Math.round(video.videoWidth * scale), 2);
       const height = Math.max(Math.round(video.videoHeight * scale), 2);
+      const tsUs = Math.round(originUs + t * 1000);
+      busySince = t;
+      if (worker) {
+        createImageBitmap(video)
+          .then(bitmap => {
+            worker.postMessage({ bitmap, tsUs, width, height, quality: JPEG_QUALITY }, [bitmap]);
+            // The main-thread share of the capture; the rest runs in the worker.
+            event("rec", "capture", t, performance.now() - t, { w: width, h: height });
+          })
+          .catch(() => {
+            busySince = 0;
+          });
+        return;
+      }
       if (scratch.width !== width || scratch.height !== height) {
         scratch.width = width;
         scratch.height = height;
       }
       scratchCtx.drawImage(video, 0, 0, width, height);
       scratch.toBlob(blob => {
-        if (!blob || uploading) return;
-        uploading = true;
-        const tsUs = Math.round(originUs + t * 1000);
-        fetch(`/api/profiler/frame?ts_us=${tsUs}`, {
-          method: "POST",
-          headers: { "X-Shararam-Live-Capability": capability, "Content-Type": "image/jpeg" },
-          body: blob
-        })
-          .catch(() => {})
-          .finally(() => {
-            uploading = false;
-            frames++;
-          });
+        event("rec", "capture", t, performance.now() - t, { w: width, h: height, sync: true });
+        if (!blob) {
+          busySince = 0;
+          return;
+        }
+        upload(blob, tsUs);
       }, "image/jpeg", JPEG_QUALITY);
     };
 

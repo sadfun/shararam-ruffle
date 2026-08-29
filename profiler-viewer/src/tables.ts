@@ -55,7 +55,13 @@ function parseArgs(value: unknown): Record<string, unknown> {
 }
 
 function preview(value: unknown, max = 140): string {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  // duckdb-wasm returns BIGINT columns as BigInt, which JSON.stringify rejects.
+  const text =
+    typeof value === "string"
+      ? value
+      : typeof value === "bigint"
+        ? value.toString()
+        : JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item));
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
@@ -273,7 +279,7 @@ export async function renderFrameDetails(
   const { rows } = await query(
     `SELECT seq, ts_us, dur_us, source, cat, name, args FROM events
      WHERE ts_us < ${endUs} AND ts_us + dur_us > ${startUs} AND dur_us < 5000000
-     ORDER BY dur_us DESC LIMIT 80`
+     ORDER BY dur_us DESC LIMIT 240`
   );
 
   container.textContent = "";
@@ -306,6 +312,37 @@ export async function renderFrameDetails(
       .forEach(([cat, ms]) => {
         summary.appendChild(el("span", "frame-summary-item", `${cat} ${formatMs(ms)}`));
       });
+    // How much of the frame no recorded main-thread work explains. Server
+    // spans and async network spans overlap the window without occupying the
+    // page's main thread, so only wasm and page-side blocking events count.
+    const mainThread = rows
+      .filter(
+        row =>
+          row["source"] === "ruffle" ||
+          (row["source"] === "browser" && (row["cat"] === "browser" || row["cat"] === "rec") && toNumber(row["dur_us"]) > 0)
+      )
+      .map(row => ({
+        from: Math.max(toNumber(row["ts_us"]), startUs),
+        to: Math.min(toNumber(row["ts_us"]) + toNumber(row["dur_us"]), endUs)
+      }))
+      .filter(span => span.to > span.from)
+      .sort((a, b) => a.from - b.from);
+    let coveredUs = 0;
+    let reachUs = startUs;
+    for (const span of mainThread) {
+      if (span.to > reachUs) {
+        coveredUs += span.to - Math.max(span.from, reachUs);
+        reachUs = span.to;
+      }
+    }
+    const unknownMs = dtMs - coveredUs / 1000;
+    if (unknownMs > Math.max(2, dtMs * 0.15)) {
+      const unknown = el("span", "frame-summary-item dim", `не учтено ${formatMs(unknownMs)}`);
+      unknown.title =
+        "Время кадра вне записанных событий главного потока: композитинг и GPU " +
+        "в браузере или неинструментированный JS (детектор блокировок ловит паузы от ~30 мс).";
+      summary.appendChild(unknown);
+    }
     container.appendChild(summary);
   }
 
@@ -313,12 +350,13 @@ export async function renderFrameDetails(
     container.appendChild(el("div", "details-empty", "Внутри кадра не записано ни одного события."));
     return;
   }
-  const refs = rows.map(row => toNumber(row["seq"]));
+  const listed = rows.slice(0, 80);
+  const refs = listed.map(row => toNumber(row["seq"]));
   const body = el("div");
   renderTable(
     body,
     ["длит.", "t", "источник", "категория", "событие", "аргументы"],
-    rows.map(row => [
+    listed.map(row => [
       toNumber(row["dur_us"]) > 0 ? formatMs(toNumber(row["dur_us"]) / 1000) : "·",
       formatClock((toNumber(row["ts_us"]) - model.t0Us) / 1000),
       String(row["source"]),
