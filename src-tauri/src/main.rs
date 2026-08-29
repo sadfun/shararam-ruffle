@@ -88,7 +88,20 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let url = format!("http://127.0.0.1:{}/?cap={}", address.port(), capability);
+    // Screen recording (profiling builds): `--rec [fps]` puts `rec=` into the
+    // opened URL, since the desktop window has no address bar to type it in.
+    // The page ignores the flag outside profiling builds.
+    let recording = args.iter().position(|arg| arg == "--rec").map(|index| {
+        args.get(index + 1)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|fps| *fps > 0.0)
+            .map(|fps| fps.to_string())
+            .unwrap_or_else(|| "1".into())
+    });
+    let mut url = format!("http://127.0.0.1:{}/?cap={}", address.port(), capability);
+    if let Some(fps) = &recording {
+        url.push_str(&format!("&rec={fps}"));
+    }
 
     #[cfg(feature = "desktop")]
     if !args.iter().any(|arg| arg == "--serve") {

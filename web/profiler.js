@@ -118,7 +118,9 @@
   const recParam = new URLSearchParams(location.search).get("rec");
   const recFps = recParam === null || recParam === "0" || recParam === "off"
     ? 0
-    : Math.min(Math.max(Number(recParam) || 2, 0.2), 10);
+    : recParam === "1" || recParam === "on" || recParam === "true"
+      ? 2 // "1" reads as "on", not "1 fps"; the default rate is 2 fps
+      : Math.min(Math.max(Number(recParam) || 2, 0.2), 10);
   if (recFps > 0) {
     const MAX_DIM = 480;
     const JPEG_QUALITY = 0.55;
