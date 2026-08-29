@@ -37,6 +37,9 @@ export interface ProfileModel {
   frameDtMs: Float64Array;
   meta: Map<string, string>;
   samples: { name: string; timesMs: Float64Array; values: Float64Array }[];
+  /** screen recording (?rec=): timestamps of stored JPEG frames */
+  snapTimesMs: Float64Array;
+  snapTsUs: Float64Array;
 }
 
 // Category → lane grouping and palette (dark-surface steps of the reference
@@ -132,6 +135,21 @@ export async function loadProfile(): Promise<ProfileModel> {
     frameDtMs[i] = toNumber(row["dt_ms"]);
   });
 
+  // Screen recording index (the table exists only in newer profiles).
+  let snapTimesMs = new Float64Array(0);
+  let snapTsUs = new Float64Array(0);
+  try {
+    const snaps = await query("SELECT ts_us FROM snapshots ORDER BY ts_us");
+    snapTimesMs = new Float64Array(snaps.rows.length);
+    snapTsUs = new Float64Array(snaps.rows.length);
+    snaps.rows.forEach((row, i) => {
+      snapTsUs[i] = toNumber(row["ts_us"]);
+      snapTimesMs[i] = (snapTsUs[i] - t0Us) / 1000;
+    });
+  } catch {
+    /* profile recorded before screen recording existed */
+  }
+
   const sampleRows = await query("SELECT ts_us, name, value FROM samples ORDER BY name, ts_us");
   const byName = new Map<string, { t: number[]; v: number[] }>();
   for (const row of sampleRows.rows) {
@@ -161,7 +179,9 @@ export async function loadProfile(): Promise<ProfileModel> {
     frameTimesMs,
     frameDtMs,
     meta,
-    samples
+    samples,
+    snapTimesMs,
+    snapTsUs
   };
 }
 

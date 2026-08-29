@@ -2,7 +2,8 @@
 // Args are parsed in JS so nothing depends on optional DuckDB extensions.
 
 import { query, toNumber, Row } from "./db";
-import { formatMs, formatBytes, formatClock } from "./model";
+import { ProfileModel, formatMs, formatBytes, formatClock } from "./model";
+import { severityColor } from "./frames";
 
 export interface EventRef {
   seq: number;
@@ -209,6 +210,125 @@ export async function renderSlowTab(
     ]),
     rowIndex => onSelect(refs[rowIndex])
   );
+}
+
+/** Top slowest animation frames; a click jumps the timeline to the frame. */
+export function renderFramesTab(
+  container: HTMLElement,
+  model: ProfileModel,
+  onFrame: (frameIndex: number) => void
+) {
+  const GAP_MS = 500;
+  const order: number[] = [];
+  for (let i = 0; i < model.frameDtMs.length; i++) {
+    if (model.frameDtMs[i] > 20 && model.frameDtMs[i] <= GAP_MS) order.push(i);
+  }
+  order.sort((a, b) => model.frameDtMs[b] - model.frameDtMs[a]);
+  const top = order.slice(0, 300);
+  if (!top.length) {
+    container.textContent = "";
+    container.appendChild(el("div", "details-empty", "Кадров дольше 20 мс нет — ровная сессия."));
+    return;
+  }
+  renderTable(
+    container,
+    ["длит.", "t", "экв. fps", ""],
+    top.map(index => {
+      const dt = model.frameDtMs[index];
+      const chip = el("span", "sev-chip");
+      chip.style.background = severityColor(dt);
+      const dur = el("span", "", ` ${formatMs(dt)}`);
+      const cell = el("span");
+      cell.appendChild(chip);
+      cell.appendChild(dur);
+      return [
+        cell,
+        formatClock(model.frameTimesMs[index] - dt),
+        (1000 / dt).toFixed(1),
+        ""
+      ];
+    }),
+    rowIndex => onFrame(top[rowIndex])
+  );
+}
+
+/**
+ * What happened inside one frame: events overlapping its window, longest
+ * first, plus a per-category time summary. Instrumented Ruffle builds put
+ * the render command stats into the tick event's args — they show up here.
+ */
+export async function renderFrameDetails(
+  container: HTMLElement,
+  model: ProfileModel,
+  frameIndex: number,
+  onSelectEvent: SelectHandler,
+  onZoom: () => void
+) {
+  const endMs = model.frameTimesMs[frameIndex];
+  const dtMs = model.frameDtMs[frameIndex];
+  const startUs = Math.round(model.t0Us + (endMs - dtMs) * 1000);
+  const endUs = Math.round(model.t0Us + endMs * 1000);
+  // Session-long spans (tunnel connections and the like) overlap every
+  // frame without being frame-local work — the 5s cap keeps them out.
+  const { rows } = await query(
+    `SELECT seq, ts_us, dur_us, source, cat, name, args FROM events
+     WHERE ts_us < ${endUs} AND ts_us + dur_us > ${startUs} AND dur_us < 5000000
+     ORDER BY dur_us DESC LIMIT 80`
+  );
+
+  container.textContent = "";
+  const header = el("div", "details-header");
+  const chip = el("span", "sev-chip");
+  chip.style.background = severityColor(dtMs);
+  header.appendChild(chip);
+  header.appendChild(el("span", "details-name", ` Кадр @${formatClock(endMs - dtMs)}`));
+  header.appendChild(el("span", "details-dur", ` · ${formatMs(dtMs)}`));
+  header.appendChild(el("span", "dim", ` · ${(1000 / dtMs).toFixed(1)} fps экв.`));
+  const zoom = el("button", "mini-button", "приблизить");
+  zoom.addEventListener("click", onZoom);
+  header.appendChild(zoom);
+  container.appendChild(header);
+
+  // per-category time, clipped to the frame window
+  const byCat = new Map<string, number>();
+  for (const row of rows) {
+    const from = Math.max(toNumber(row["ts_us"]), startUs);
+    const to = Math.min(toNumber(row["ts_us"]) + toNumber(row["dur_us"]), endUs);
+    if (to <= from) continue;
+    const cat = `${row["source"]}/${row["cat"]}`;
+    byCat.set(cat, (byCat.get(cat) ?? 0) + (to - from) / 1000);
+  }
+  if (byCat.size) {
+    const summary = el("div", "frame-summary");
+    [...byCat.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .forEach(([cat, ms]) => {
+        summary.appendChild(el("span", "frame-summary-item", `${cat} ${formatMs(ms)}`));
+      });
+    container.appendChild(summary);
+  }
+
+  if (!rows.length) {
+    container.appendChild(el("div", "details-empty", "Внутри кадра не записано ни одного события."));
+    return;
+  }
+  const refs = rows.map(row => toNumber(row["seq"]));
+  const body = el("div");
+  renderTable(
+    body,
+    ["длит.", "t", "источник", "категория", "событие", "аргументы"],
+    rows.map(row => [
+      toNumber(row["dur_us"]) > 0 ? formatMs(toNumber(row["dur_us"]) / 1000) : "·",
+      formatClock((toNumber(row["ts_us"]) - model.t0Us) / 1000),
+      String(row["source"]),
+      String(row["cat"]),
+      String(row["name"]),
+      preview(row["args"] ?? "")
+    ]),
+    rowIndex => onSelectEvent(refs[rowIndex])
+  );
+  container.appendChild(body);
 }
 
 export async function runSql(container: HTMLElement, sql: string) {

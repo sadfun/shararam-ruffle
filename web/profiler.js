@@ -110,6 +110,79 @@
   window.addEventListener("pagehide", () => flush(true));
   window.addEventListener("beforeunload", () => flush(true));
 
+  // Screen recording (?rec=1 or ?rec=<fps>): a low-rate filmstrip of the
+  // game canvas stored into the profile next to the events, so the viewer
+  // can show what was on screen at any point of the timeline. Frames go
+  // through captureStream + a hidden <video>: reading the WebGL canvas
+  // directly returns blanks once its buffer has been composited.
+  const recParam = new URLSearchParams(location.search).get("rec");
+  const recFps = recParam === null || recParam === "0" || recParam === "off"
+    ? 0
+    : Math.min(Math.max(Number(recParam) || 2, 0.2), 10);
+  if (recFps > 0) {
+    const MAX_DIM = 480;
+    const JPEG_QUALITY = 0.55;
+    const scratch = document.createElement("canvas");
+    const scratchCtx = scratch.getContext("2d");
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none";
+    let uploading = false;
+    let frames = 0;
+
+    const captureOne = () => {
+      if (document.hidden || uploading || video.readyState < 2 || !video.videoWidth) return;
+      const t = performance.now();
+      const scale = Math.min(MAX_DIM / video.videoWidth, MAX_DIM / video.videoHeight, 1);
+      const width = Math.max(Math.round(video.videoWidth * scale), 2);
+      const height = Math.max(Math.round(video.videoHeight * scale), 2);
+      if (scratch.width !== width || scratch.height !== height) {
+        scratch.width = width;
+        scratch.height = height;
+      }
+      scratchCtx.drawImage(video, 0, 0, width, height);
+      scratch.toBlob(blob => {
+        if (!blob || uploading) return;
+        uploading = true;
+        const tsUs = Math.round(originUs + t * 1000);
+        fetch(`/api/profiler/frame?ts_us=${tsUs}`, {
+          method: "POST",
+          headers: { "X-Shararam-Live-Capability": capability, "Content-Type": "image/jpeg" },
+          body: blob
+        })
+          .catch(() => {})
+          .finally(() => {
+            uploading = false;
+            frames++;
+          });
+      }, "image/jpeg", JPEG_QUALITY);
+    };
+
+    const startRecording = canvas => {
+      let stream;
+      try {
+        stream = canvas.captureStream(Math.max(recFps * 2, 4));
+      } catch (error) {
+        marker("rec_error", { error: String(error) });
+        return;
+      }
+      video.srcObject = stream;
+      document.body.appendChild(video);
+      video.play().catch(error => marker("rec_error", { error: String(error) }));
+      pending.meta.push(["recording_fps", String(recFps)]);
+      marker("rec_start", { fps: recFps, canvas: `${canvas.width}x${canvas.height}` });
+      setInterval(captureOne, Math.round(1000 / recFps));
+    };
+
+    const waitForCanvas = setInterval(() => {
+      const canvas = window.__shararamRuffle?.getPlayer?.()?.shadowRoot?.querySelector("canvas");
+      if (!canvas || !canvas.width) return;
+      clearInterval(waitForCanvas);
+      startRecording(canvas);
+    }, 500);
+  }
+
   // Tell the player where the profile goes.
   const badge = document.getElementById("profiler-badge");
   fetch("/api/profiler/info", { headers: { "X-Shararam-Live-Capability": capability } })
@@ -117,7 +190,7 @@
     .then(info => {
       if (!badge || !info.enabled) return;
       badge.hidden = false;
-      badge.textContent = `● профиль: ${info.path}`;
+      badge.textContent = `● профиль: ${info.path}${recFps > 0 ? ` · rec ${recFps}fps` : ""}`;
       pending.meta.push(["profile_path", info.path || ""]);
     })
     .catch(() => {});

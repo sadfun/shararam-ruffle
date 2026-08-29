@@ -9,6 +9,9 @@ const GAP_THRESHOLD_MS = 500;
 const SLOW_FRAME_MS = 50;
 
 export class FpsChart {
+  /** shared scrub cursor (profile ms) */
+  cursorMs: number | null = null;
+
   constructor(
     private canvas: HTMLCanvasElement,
     private viewport: Viewport,
@@ -162,5 +165,17 @@ export class FpsChart {
 
     ctx.fillStyle = "#7d7f83";
     ctx.fillText("fps", 8, axisTop + 10);
+
+    // scrub cursor
+    if (this.cursorMs !== null) {
+      const x = Math.round(LEFT_GUTTER + this.viewport.xOf(this.cursorMs, plotWidth)) + 0.5;
+      if (x >= LEFT_GUTTER && x <= width) {
+        ctx.strokeStyle = "rgba(232, 233, 235, 0.3)";
+        ctx.beginPath();
+        ctx.moveTo(x, axisTop);
+        ctx.lineTo(x, axisBottom);
+        ctx.stroke();
+      }
+    }
   }
 }

@@ -57,17 +57,55 @@ section { padding: 6px 10px 0; }
 .dim { color: var(--text-3); font-weight: 400; }
 
 #fps-section { flex: 0 0 auto; }
-#fps-canvas { width: 100%; height: 110px; display: block; border-radius: 8px; }
+#fps-canvas { width: 100%; height: 96px; display: block; border-radius: 8px; }
+
+#frames-section { flex: 0 0 auto; }
+#frame-strip { width: 100%; height: 64px; display: block; border-radius: 8px; cursor: crosshair; }
+.frame-nav { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.mini-button {
+  background: var(--surface-3); color: var(--text-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 8px; cursor: pointer; font: 600 11px/1.4 inherit;
+  font-family: inherit;
+}
+.mini-button:hover { color: var(--text); border-color: var(--text-3); }
+.mini-select {
+  background: var(--surface-3); color: var(--text-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 4px; font: 600 11px/1.4 inherit; font-family: inherit;
+}
+
+/* recording preview: fixed right column of the bottom panel */
+#preview {
+  flex: 0 0 278px; border-left: 1px solid var(--border);
+  padding: 8px; display: flex; flex-direction: column; align-items: center;
+  justify-content: flex-start; gap: 4px; overflow: hidden;
+}
+#preview[hidden] { display: none; }
+#preview img {
+  display: block; width: 100%; border-radius: 6px; background: var(--surface-3);
+  min-height: 40px;
+}
+#preview-caption { font: 10.5px ui-monospace, Menlo, monospace; text-align: center; }
+
+.sev-chip {
+  display: inline-block; width: 8px; height: 8px; border-radius: 2px; vertical-align: baseline;
+}
+.frame-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.frame-summary-item {
+  background: var(--surface-3); border-radius: 6px; padding: 1px 8px;
+  font: 11px ui-monospace, Menlo, monospace; color: var(--text-2);
+}
+.details-header .mini-button { margin-left: 10px; }
 
 #timeline-section { flex: 1 1 auto; min-height: 120px; display: flex; flex-direction: column; }
 #timeline-wrap { flex: 1; min-height: 0; overflow-y: auto; border-radius: 8px; }
 #timeline-canvas { width: 100%; display: block; }
 
 #bottom {
-  flex: 0 0 32%; min-height: 180px; display: flex; flex-direction: column;
+  flex: 0 0 32%; min-height: 180px; display: flex; flex-direction: row;
   border-top: 1px solid var(--border); background: var(--surface-2);
   padding: 0;
 }
+#bottom-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #tabs { display: flex; gap: 2px; padding: 6px 10px 0; flex: 0 0 auto; }
 #tabs button {
   background: transparent; border: 0; color: var(--text-3);

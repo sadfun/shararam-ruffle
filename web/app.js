@@ -19,12 +19,15 @@
   // ratio (4x fewer pixels on a 2x display).
   const quality = query.get("quality") || "";
   const forceDpr = query.get("dpr") || "";
+  // Screen recording into the profile (profiling builds; see web/profiler.js).
+  const recording = query.get("rec") || "";
   if (capability) sessionStorage.setItem("shararam-live-capability", capability);
   const preservedQuery = [
     debugMode ? "debug=1" : "",
     autoServer ? "autoserver=1" : "",
     quality ? `quality=${encodeURIComponent(quality)}` : "",
     forceDpr ? `dpr=${encodeURIComponent(forceDpr)}` : "",
+    recording ? `rec=${encodeURIComponent(recording)}` : "",
   ].filter(Boolean).join("&");
   if (forceDpr) {
     const value = Number(forceDpr);

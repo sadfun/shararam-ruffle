@@ -57,6 +57,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/profiler/info", get(profiler_info))
         .route("/api/profiler/events", post(profiler_events))
+        .route("/api/profiler/frame", post(profiler_frame))
         .route("/game/base.swf", get(official_base))
         .route("/socket-proxy", get(socket_proxy))
         .route("/official/{*path}", any(official_proxy))
@@ -186,6 +187,36 @@ async fn profiler_events(
         )
             .into_response(),
     }
+}
+
+/// Receives one screen-recording frame (a small JPEG) from `web/profiler.js`
+/// when the page runs with `?rec=`. The timestamp comes as epoch µs in the
+/// query so the body stays raw image bytes.
+async fn profiler_frame(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !valid_capability_header(&state, &headers) {
+        return forbidden();
+    }
+    if !state.profiler.enabled() {
+        return (StatusCode::NOT_FOUND, "Not a profiling build").into_response();
+    }
+    let Some(ts_us) = query.get("ts_us").and_then(|value| value.parse().ok()) else {
+        return (StatusCode::BAD_REQUEST, "ts_us required").into_response();
+    };
+    if body.is_empty() || body.len() > 512 * 1024 {
+        return (StatusCode::BAD_REQUEST, "unreasonable frame size").into_response();
+    }
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    state.profiler.snapshot(ts_us, &mime, body.to_vec());
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn login(

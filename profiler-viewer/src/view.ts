@@ -52,6 +52,13 @@ export class Viewport {
     this.emit();
   }
 
+  setRange(v0: number, v1: number) {
+    this.v0 = v0;
+    this.v1 = Math.max(v1, v0 + 1);
+    this.clamp();
+    this.emit();
+  }
+
   private clamp() {
     const span = this.span();
     if (this.v0 < -this.totalMs * 0.05) {

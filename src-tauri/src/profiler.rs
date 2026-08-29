@@ -53,6 +53,7 @@ mod imp {
         Events(Vec<Event>),
         Frames(Vec<(i64, f64)>),
         Samples(Vec<(i64, String, f64)>),
+        Snapshot(i64, String, Vec<u8>),
         Meta(String, String),
         Finish(Sender<()>),
     }
@@ -169,6 +170,16 @@ mod imp {
                 return;
             }
             self.send(Message::Samples(vec![(now_us(), name.to_string(), value)]));
+        }
+
+        /// Stores one screen-recording frame (a small JPEG posted by the
+        /// page when `?rec=` is on). The viewer shows these as a filmstrip
+        /// preview next to the timeline.
+        pub fn snapshot(&self, ts_us: i64, mime: &str, bytes: Vec<u8>) {
+            if !self.enabled() {
+                return;
+            }
+            self.send(Message::Snapshot(ts_us, mime.to_string(), bytes));
         }
 
         /// Stores a batch posted by the page. Returns the number of stored
@@ -307,7 +318,8 @@ mod imp {
                      seq BIGINT, ts_us BIGINT, dur_us BIGINT,
                      source VARCHAR, cat VARCHAR, name VARCHAR, args VARCHAR);
                  CREATE TABLE IF NOT EXISTS frames(ts_us BIGINT, dt_ms DOUBLE);
-                 CREATE TABLE IF NOT EXISTS samples(ts_us BIGINT, name VARCHAR, value DOUBLE);",
+                 CREATE TABLE IF NOT EXISTS samples(ts_us BIGINT, name VARCHAR, value DOUBLE);
+                 CREATE TABLE IF NOT EXISTS snapshots(ts_us BIGINT, mime VARCHAR, bytes BLOB);",
             )
             .context("cannot create profile schema")?;
         Ok(())
@@ -400,6 +412,13 @@ mod imp {
                     dirty = true;
                     Ok(())
                 })(),
+                Some(Message::Snapshot(ts_us, mime, bytes)) => (|| {
+                    let mut appender = connection.appender("snapshots")?;
+                    appender.append_row(params![ts_us, mime, bytes])?;
+                    appender.flush()?;
+                    dirty = true;
+                    Ok(())
+                })(),
                 Some(Message::Meta(key, value)) => connection
                     .execute("INSERT INTO meta VALUES (?, ?)", params![key, value])
                     .map(|_| ())
@@ -461,6 +480,11 @@ mod imp {
                 2_000,
                 Some("{\"path\":\"a\"}".into()),
             );
+            profiler.snapshot(
+                1_700_000_000_050_000,
+                "image/jpeg",
+                vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00],
+            );
             profiler.finish();
 
             let connection = Connection::open(&path).unwrap();
@@ -495,6 +519,16 @@ mod imp {
                 )
                 .unwrap();
             assert_eq!(meta, "test");
+            let (snap_ts, snap_mime, snap_len): (i64, String, i64) = connection
+                .query_row(
+                    "SELECT ts_us, mime, octet_length(bytes) FROM snapshots",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(snap_ts, 1_700_000_000_050_000);
+            assert_eq!(snap_mime, "image/jpeg");
+            assert_eq!(snap_len, 5);
             drop(connection);
             let _ = std::fs::remove_dir_all(directory);
         }
@@ -539,6 +573,8 @@ mod imp {
         }
         #[inline(always)]
         pub fn sample(&self, _name: &str, _value: f64) {}
+        #[inline(always)]
+        pub fn snapshot(&self, _ts_us: i64, _mime: &str, _bytes: Vec<u8>) {}
         #[inline(always)]
         pub fn ingest_browser_batch(&self, _body: &[u8]) -> anyhow::Result<usize> {
             Ok(0)

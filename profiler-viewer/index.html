@@ -31,6 +31,23 @@
         <div class="section-title">FPS <span id="fps-summary" class="dim"></span></div>
         <canvas id="fps-canvas"></canvas>
       </section>
+      <section id="frames-section">
+        <div class="section-title">
+          Кадры
+          <span id="frames-summary" class="dim"></span>
+          <span class="frame-nav">
+            <button id="prev-slow" class="mini-button" title="предыдущий медленный кадр">⟨ медленный</button>
+            <select id="slow-threshold" class="mini-select" title="порог медленного кадра">
+              <option value="20">&gt;20 мс</option>
+              <option value="36">&gt;36 мс</option>
+              <option value="50" selected>&gt;50 мс</option>
+              <option value="100">&gt;100 мс</option>
+            </select>
+            <button id="next-slow" class="mini-button" title="следующий медленный кадр">медленный ⟩</button>
+          </span>
+        </div>
+        <canvas id="frame-strip"></canvas>
+      </section>
       <section id="timeline-section">
         <div class="section-title">
           События
@@ -42,14 +59,17 @@
         </div>
       </section>
       <section id="bottom">
+        <div id="bottom-main">
         <nav id="tabs">
           <button data-tab="details" class="active">Детали</button>
+          <button data-tab="frames">Кадры</button>
           <button data-tab="rtmp">RTMP</button>
           <button data-tab="loads">Загрузки</button>
           <button data-tab="slow">Медленное</button>
           <button data-tab="sql">SQL</button>
         </nav>
-        <div id="tab-details" class="tab active"><div id="details" class="details-empty">Кликните по событию на таймлайне.</div></div>
+        <div id="tab-details" class="tab active"><div id="details" class="details-empty">Кликните по кадру или событию на таймлайне.</div></div>
+        <div id="tab-frames" class="tab"><div id="frames-table"></div></div>
         <div id="tab-rtmp" class="tab"><div id="rtmp-table"></div></div>
         <div id="tab-loads" class="tab"><div id="loads-table"></div></div>
         <div id="tab-slow" class="tab"><div id="slow-table"></div></div>
@@ -61,6 +81,11 @@ FROM events GROUP BY 1,2,3 ORDER BY total_ms DESC LIMIT 30</textarea>
           </div>
           <div id="sql-result"></div>
         </div>
+        </div>
+        <aside id="preview" hidden>
+          <img id="preview-img" alt="кадр записи экрана">
+          <div id="preview-caption" class="dim"></div>
+        </aside>
       </section>
     </main>
     <div id="tooltip" hidden></div>

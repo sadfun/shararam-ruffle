@@ -24,6 +24,10 @@ export class Timeline {
   private laneTops: number[] = [];
   hoveredIndex = -1;
   selectedIndex = -1;
+  /** [startMs, endMs] of the selected frame, shown as a band */
+  highlightSpan: [number, number] | null = null;
+  /** shared scrub cursor (profile ms) */
+  cursorMs: number | null = null;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -82,6 +86,42 @@ export class Timeline {
       y += laneHeight + LANE_PADDING;
     }
     const axisY = y;
+
+    // Frame boundaries once zoomed close enough (~12px per 60 Hz frame):
+    // separators at each animation-frame edge, slow frames tinted, so the
+    // events visually group into "this frame was slow because of…".
+    const frameTimes = model.frameTimesMs;
+    if (frameTimes.length && viewport.span() / plotWidth < 1.4) {
+      const firstFrame = Math.max(lowerBound(frameTimes, viewport.v0) - 1, 0);
+      const lastFrame = Math.min(lowerBound(frameTimes, viewport.v1) + 1, frameTimes.length);
+      for (let i = firstFrame; i < lastFrame; i++) {
+        const dt = model.frameDtMs[i];
+        if (dt > 500) continue;
+        const x0 = LEFT_GUTTER + viewport.xOf(frameTimes[i] - dt, plotWidth);
+        const x1 = LEFT_GUTTER + viewport.xOf(frameTimes[i], plotWidth);
+        if (dt > 20) {
+          ctx.fillStyle = dt > 50 ? "rgba(230, 103, 103, 0.10)" : "rgba(201, 133, 0, 0.07)";
+          ctx.fillRect(x0, FLAGS_HEIGHT, x1 - x0, axisY - FLAGS_HEIGHT);
+        }
+        ctx.strokeStyle = "rgba(125, 127, 131, 0.28)";
+        ctx.beginPath();
+        ctx.moveTo(Math.round(x1) + 0.5, FLAGS_HEIGHT);
+        ctx.lineTo(Math.round(x1) + 0.5, axisY);
+        ctx.stroke();
+      }
+    }
+
+    // selected frame band
+    if (this.highlightSpan) {
+      const x0 = LEFT_GUTTER + viewport.xOf(this.highlightSpan[0], plotWidth);
+      const x1 = LEFT_GUTTER + viewport.xOf(this.highlightSpan[1], plotWidth);
+      if (x1 >= LEFT_GUTTER && x0 <= width) {
+        ctx.fillStyle = "rgba(232, 233, 235, 0.06)";
+        ctx.fillRect(x0, FLAGS_HEIGHT, x1 - x0, axisY - FLAGS_HEIGHT);
+        ctx.strokeStyle = "rgba(232, 233, 235, 0.5)";
+        ctx.strokeRect(x0 + 0.5, FLAGS_HEIGHT + 0.5, Math.max(x1 - x0 - 1, 1), axisY - FLAGS_HEIGHT - 1);
+      }
+    }
 
     // visible index range
     const from = Math.max(lowerBound(model.startMs, viewport.v0 - 60000) , 0);
@@ -178,6 +218,18 @@ export class Timeline {
       ctx.lineTo(x, axisY + 4);
       ctx.stroke();
       ctx.fillText(formatClock(t), x + 3, axisY + 14);
+    }
+
+    // scrub cursor
+    if (this.cursorMs !== null) {
+      const x = Math.round(LEFT_GUTTER + viewport.xOf(this.cursorMs, plotWidth)) + 0.5;
+      if (x >= LEFT_GUTTER && x <= width) {
+        ctx.strokeStyle = "rgba(232, 233, 235, 0.3)";
+        ctx.beginPath();
+        ctx.moveTo(x, FLAGS_HEIGHT);
+        ctx.lineTo(x, axisY);
+        ctx.stroke();
+      }
     }
   }
 }
