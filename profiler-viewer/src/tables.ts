@@ -312,14 +312,16 @@ export async function renderFrameDetails(
       .forEach(([cat, ms]) => {
         summary.appendChild(el("span", "frame-summary-item", `${cat} ${formatMs(ms)}`));
       });
-    // How much of the frame no recorded main-thread work explains. Server
-    // spans and async network spans overlap the window without occupying the
-    // page's main thread, so only wasm and page-side blocking events count.
+    // How much of the frame nothing recorded explains. Server spans and async
+    // network spans overlap the window without delaying the frame, so only
+    // wasm work, page-side blocking events and GPU-queue waits count.
     const mainThread = rows
       .filter(
         row =>
           row["source"] === "ruffle" ||
-          (row["source"] === "browser" && (row["cat"] === "browser" || row["cat"] === "rec") && toNumber(row["dur_us"]) > 0)
+          (row["source"] === "browser" &&
+            (row["cat"] === "browser" || row["cat"] === "rec" || row["cat"] === "gpu") &&
+            toNumber(row["dur_us"]) > 0)
       )
       .map(row => ({
         from: Math.max(toNumber(row["ts_us"]), startUs),
@@ -339,8 +341,9 @@ export async function renderFrameDetails(
     if (unknownMs > Math.max(2, dtMs * 0.15)) {
       const unknown = el("span", "frame-summary-item dim", `не учтено ${formatMs(unknownMs)}`);
       unknown.title =
-        "Время кадра вне записанных событий главного потока: композитинг и GPU " +
-        "в браузере или неинструментированный JS (детектор блокировок ловит паузы от ~30 мс).";
+        "Время кадра, не покрытое ничем записанным: работой wasm, блокировками " +
+        "главного потока (stall, от ~30 мс) и ожиданием GPU (gpu/fence_wait). " +
+        "Остаток — композитор браузера или неинструментированный JS.";
       summary.appendChild(unknown);
     }
     container.appendChild(summary);

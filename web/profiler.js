@@ -132,6 +132,7 @@
   // can show what was on screen at any point of the timeline. Frames go
   // through captureStream + a hidden <video>: reading the WebGL canvas
   // directly returns blanks once its buffer has been composited.
+  let recordingStarter = null;
   const recParam = new URLSearchParams(location.search).get("rec");
   const recFps = recParam === null || recParam === "0" || recParam === "off"
     ? 0
@@ -257,13 +258,78 @@
       setInterval(captureOne, Math.round(1000 / recFps));
     };
 
-    const waitForCanvas = setInterval(() => {
-      const canvas = window.__shararamRuffle?.getPlayer?.()?.shadowRoot?.querySelector("canvas");
-      if (!canvas || !canvas.width) return;
-      clearInterval(waitForCanvas);
-      startRecording(canvas);
-    }, 500);
+    recordingStarter = startRecording;
   }
+
+  // GPU fence probe. At a steady 20-35 fps the main thread sits idle and every
+  // JS-side collector sees nothing: rAF simply arrives late because the GPU /
+  // compositor is still busy with the previous frame. The game canvas is
+  // WebGL2, so inserting a fence into its queue each rAF and polling it
+  // measures how long the queue actually drains — that otherwise-invisible
+  // time becomes gpu/fence_wait spans.
+  const startGpuProbe = canvas => {
+    let gl = null;
+    try {
+      gl = canvas.getContext("webgl2");
+    } catch (_) {}
+    if (!gl || typeof gl.fenceSync !== "function") {
+      marker("gpu_probe_unavailable", {});
+      return;
+    }
+    const fences = [];
+    const dropAll = () => {
+      for (const fence of fences) {
+        try {
+          gl.deleteSync(fence.sync);
+        } catch (_) {}
+      }
+      fences.length = 0;
+    };
+    const poll = () => {
+      const now = performance.now();
+      while (fences.length) {
+        const head = fences[0];
+        let status;
+        try {
+          status = gl.clientWaitSync(head.sync, 0, 0);
+        } catch (_) {
+          status = gl.WAIT_FAILED;
+        }
+        // The queue is FIFO: if the oldest fence isn't signalled, later ones aren't either.
+        if (status === gl.TIMEOUT_EXPIRED) break;
+        try {
+          gl.deleteSync(head.sync);
+        } catch (_) {}
+        fences.shift();
+        if (status !== gl.WAIT_FAILED && !document.hidden) {
+          const wait = now - head.t;
+          if (wait >= 8) event("gpu", "fence_wait", head.t, wait);
+        }
+      }
+    };
+    const insert = () => {
+      poll();
+      if (!document.hidden && fences.length < 8) {
+        try {
+          const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+          if (sync) fences.push({ sync, t: performance.now() });
+        } catch (_) {}
+      }
+      requestAnimationFrame(insert);
+    };
+    requestAnimationFrame(insert);
+    setInterval(poll, 10);
+    document.addEventListener("visibilitychange", dropAll);
+    marker("gpu_probe_start", {});
+  };
+
+  const waitForCanvas = setInterval(() => {
+    const canvas = window.__shararamRuffle?.getPlayer?.()?.shadowRoot?.querySelector("canvas");
+    if (!canvas || !canvas.width) return;
+    clearInterval(waitForCanvas);
+    startGpuProbe(canvas);
+    if (recordingStarter) recordingStarter(canvas);
+  }, 500);
 
   // Tell the player where the profile goes.
   const badge = document.getElementById("profiler-badge");
