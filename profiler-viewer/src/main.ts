@@ -1,178 +1,161 @@
 import "./style.css";
 import { initEngine, openProfile } from "./db";
 import { loadProfile, ProfileModel, formatMs } from "./model";
-import { Viewport, attachNavigation } from "./view";
-import { FpsChart, LEFT_GUTTER } from "./fps";
-import { Timeline } from "./timeline";
-import { FrameStrip } from "./frames";
+import { Viewport, lowerBound } from "./view";
+import { buildFrameData, FrameData } from "./frameData";
+import { ScoutState } from "./state";
+import { FrameTimeline } from "./frameTimeline";
+import { SessionSummary } from "./sessionSummary";
+import { SummaryPanel } from "./summaryPanel";
+import { TopActivities } from "./topActivities";
+import { ActivitySequence } from "./activitySequence";
+import { TraceLogPanel } from "./traceLog";
+import { renderSessionInfo } from "./sessionInfoPanel";
+import { RenderPanel } from "./renderPanel";
 import { SnapshotPreview } from "./snapshots";
-import {
-  renderRtmpTab,
-  renderLoadsTab,
-  renderSlowTab,
-  renderFramesTab,
-  renderGpuTab,
-  renderFrameDetails,
-  renderDetails,
-  runSql
-} from "./tables";
-import { buildFrameSeries } from "./metrics";
-import { MetricLanes } from "./lanes";
+import { renderRtmpTab, renderLoadsTab, runSql } from "./tables";
 
 const statusEl = document.getElementById("status")!;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const dropHint = document.getElementById("drop-hint")!;
 const workspace = document.getElementById("workspace")!;
-const sessionInfo = document.getElementById("session-info")!;
+const sessionInfoEl = document.getElementById("session-info")!;
 const tooltip = document.getElementById("tooltip")!;
-const slowThreshold = document.getElementById("slow-threshold") as HTMLSelectElement;
 
 let model: ProfileModel | null = null;
+let data: FrameData | null = null;
+let state = new ScoutState();
 let viewport = new Viewport();
-let fpsChart: FpsChart | null = null;
-let frameStrip: FrameStrip | null = null;
-let lanes: MetricLanes | null = null;
-let timeline: Timeline | null = null;
+let timeline: FrameTimeline | null = null;
+let strip: SessionSummary | null = null;
+let summaryPanel: SummaryPanel | null = null;
+let topActivities: TopActivities | null = null;
+let sequence: ActivitySequence | null = null;
+let traceLog: TraceLogPanel | null = null;
+let renderPanel: RenderPanel | null = null;
 let preview: SnapshotPreview | null = null;
-let redrawQueued = false;
+
+interface SessionEntry {
+  name: string;
+  file: File;
+}
+const sessions: SessionEntry[] = [];
+let currentSession = -1;
 
 function status(text: string) {
   statusEl.textContent = text;
 }
 
+let redrawQueued = false;
 function queueRedraw() {
   if (redrawQueued) return;
   redrawQueued = true;
   requestAnimationFrame(() => {
     redrawQueued = false;
-    fpsChart?.draw();
-    frameStrip?.draw();
-    lanes?.draw();
     timeline?.draw();
+    strip?.draw();
   });
 }
 
-function activateTab(name: string) {
-  document.querySelectorAll<HTMLElement>("#tabs button").forEach(button => {
-    button.classList.toggle("active", button.dataset["tab"] === name);
+let panelsQueued = false;
+function queuePanels() {
+  if (panelsQueued) return;
+  panelsQueued = true;
+  requestAnimationFrame(() => {
+    panelsQueued = false;
+    summaryPanel?.render();
+    topActivities?.render();
+    sequence?.render();
+    traceLog?.render();
+    void renderPanel?.render();
   });
-  document.querySelectorAll<HTMLElement>(".tab").forEach(tab => {
-    tab.classList.toggle("active", tab.id === `tab-${name}`);
-  });
-}
-
-/** Scrub position shared by all charts + the recording preview. */
-function setCursor(ms: number | null) {
-  if (fpsChart) fpsChart.cursorMs = ms;
-  if (frameStrip) frameStrip.cursorMs = ms;
-  if (lanes) lanes.cursorMs = ms;
-  if (timeline) timeline.cursorMs = ms;
-  if (ms !== null) preview?.showAt(ms);
-  queueRedraw();
-}
-
-async function selectEvent(seq: number) {
-  if (!model) return;
-  activateTab("details");
-  await renderDetails(document.getElementById("details")!, seq, model.t0Us);
-  if (timeline) {
-    const index = model.seq.indexOf(seq);
-    timeline.selectedIndex = index;
-    if (index >= 0) preview?.showAt(model.startMs[index]);
-    queueRedraw();
-  }
-}
-
-function zoomToFrame(index: number) {
-  if (!model || !frameStrip) return;
-  const [start, end] = frameStrip.frameSpan(index);
-  const span = Math.max((end - start) * 8, 200);
-  const center = (start + end) / 2;
-  viewport.setRange(center - span / 2, center + span / 2);
-}
-
-async function selectFrame(index: number, ensureVisible = false) {
-  if (!model || !frameStrip || !timeline) return;
-  frameStrip.selectedIndex = index;
-  timeline.selectedIndex = -1;
-  const span = frameStrip.frameSpan(index);
-  timeline.highlightSpan = span;
-  if (ensureVisible && (span[0] < viewport.v0 || span[1] > viewport.v1 || viewport.span() > 5000)) {
-    const width = Math.max(Math.min(viewport.span(), 2000), (span[1] - span[0]) * 8);
-    const center = (span[0] + span[1]) / 2;
-    viewport.setRange(center - width / 2, center + width / 2);
-  }
-  preview?.showAt((span[0] + span[1]) / 2);
-  activateTab("details");
-  await renderFrameDetails(
-    document.getElementById("details")!,
-    model,
-    index,
-    seq => void selectEvent(seq),
-    () => zoomToFrame(index)
-  );
-  queueRedraw();
-}
-
-function jumpSlow(direction: 1 | -1) {
-  if (!model || !frameStrip) return;
-  const threshold = Number(slowThreshold.value);
-  const list = frameStrip.slowFrames(threshold);
-  if (!list.length) {
-    status(`кадров дольше ${threshold} мс нет`);
-    return;
-  }
-  let current = frameStrip.selectedIndex;
-  if (current < 0) {
-    // start from the middle of the current view
-    const centerMs = (viewport.v0 + viewport.v1) / 2;
-    const times = model.frameTimesMs;
-    let low = 0;
-    let high = times.length;
-    while (low < high) {
-      const mid = (low + high) >> 1;
-      if (times[mid] < centerMs) low = mid + 1;
-      else high = mid;
-    }
-    current = direction > 0 ? low - 1 : low;
-  }
-  let target: number | undefined;
-  if (direction > 0) {
-    target = list.find(i => i > current);
-  } else {
-    for (const i of list) {
-      if (i < current) target = i;
-      else break;
-    }
-  }
-  if (target === undefined) {
-    status(direction > 0 ? "дальше медленных кадров нет" : "раньше медленных кадров нет");
-    return;
-  }
-  void selectFrame(target, true);
-}
-
-function updateFramesSummary() {
-  if (!model || !frameStrip) return;
-  const threshold = Number(slowThreshold.value);
-  const slow = frameStrip.slowFrames(threshold).length;
-  document.getElementById("frames-summary")!.textContent =
-    `${model.frameTimesMs.length.toLocaleString("ru")} кадров · дольше ${threshold} мс: ${slow.toLocaleString("ru")}` +
-    (model.snapTimesMs.length
-      ? ` · запись экрана: ${model.snapTimesMs.length.toLocaleString("ru")} кадров`
-      : "");
-}
-
-function msAt(canvas: HTMLCanvasElement, clientX: number): number {
-  const rect = canvas.getBoundingClientRect();
-  return viewport.msOf(clientX - rect.left - LEFT_GUTTER, rect.width - LEFT_GUTTER);
 }
 
 function showTooltip(clientX: number, clientY: number, text: string) {
   tooltip.hidden = false;
   tooltip.textContent = text;
-  tooltip.style.left = `${Math.min(clientX + 14, window.innerWidth - 340)}px`;
-  tooltip.style.top = `${clientY + 14}px`;
+  tooltip.style.left = `${Math.min(clientX + 14, window.innerWidth - 380)}px`;
+  tooltip.style.top = `${Math.min(clientY + 14, window.innerHeight - 160)}px`;
+}
+function hideTooltip() {
+  tooltip.hidden = true;
+}
+
+/** replaces a canvas with a fresh clone so old pointer listeners die */
+function freshCanvas(id: string): HTMLCanvasElement {
+  const old = document.getElementById(id) as HTMLCanvasElement;
+  const fresh = old.cloneNode(false) as HTMLCanvasElement;
+  old.replaceWith(fresh);
+  return fresh;
+}
+
+function selectFrameAtSeq(seq: number) {
+  if (!model) return;
+  const index = model.seq.indexOf(seq);
+  if (index < 0) return;
+  const frame = Math.min(
+    lowerBound(model.frameTimesMs, model.startMs[index]),
+    model.frameTimesMs.length - 1
+  );
+  state.setSelection({ a: frame, b: frame });
+  // bring the frame into view
+  const center = model.frameTimesMs[frame];
+  if (center < viewport.v0 || center > viewport.v1) {
+    const span = Math.min(viewport.span(), 5000);
+    viewport.setRange(center - span / 2, center + span / 2);
+  }
+}
+
+function renderSessionList() {
+  const container = document.getElementById("side-sessions")!;
+  container.textContent = "";
+  sessions.forEach((session, index) => {
+    const row = document.createElement("div");
+    row.className = `session-entry${index === currentSession ? " active" : ""}`;
+    const name = document.createElement("span");
+    name.textContent = session.name;
+    row.appendChild(name);
+    row.addEventListener("click", () => {
+      if (index !== currentSession) void openFile(session.file);
+    });
+    container.appendChild(row);
+  });
+}
+
+function renderSidebarCollectors() {
+  if (!model || !data) return;
+  const container = document.getElementById("side-collectors")!;
+  container.textContent = "";
+  const has = (predicate: (cat: string, name: string, source: string) => boolean) =>
+    model!.kinds.some(kind => predicate(kind.cat, kind.name, kind.source));
+  const rows: [string, boolean][] = [
+    ["События Ruffle", has((_c, _n, s) => s === "ruffle")],
+    ["Счётчики рендера", has((c, n) => c === "render" && n === "submit_frame")],
+    ["GPU-датчик (fence)", has(c => c === "gpu")],
+    ["Детектор блокировок", has((c, n) => c === "browser" && n === "stall")],
+    ["Запись экрана", model.snapTimesMs.length > 0],
+    ["Сэмплер AVM-стека", false],
+    ["Трекинг аллокаций", false]
+  ];
+  for (const [name, present] of rows) {
+    const row = document.createElement("div");
+    row.className = `collector${present ? "" : " collector-off"}`;
+    const mark = document.createElement("span");
+    mark.className = "collector-mark";
+    mark.textContent = present ? "✓" : "✗";
+    row.appendChild(mark);
+    const label = document.createElement("span");
+    label.textContent = name;
+    row.appendChild(label);
+    container.appendChild(row);
+  }
+}
+
+function applyChartToggles() {
+  if (!timeline) return;
+  const canvas = document.getElementById("timeline-canvas") as HTMLCanvasElement;
+  canvas.style.height = `${timeline.preferredHeight()}px`;
+  queueRedraw();
 }
 
 async function openFile(file: File) {
@@ -181,19 +164,31 @@ async function openFile(file: File) {
     await openProfile(file);
     status("читаю события…");
     model = await loadProfile();
+    status("строю данные кадров…");
+    data = await buildFrameData(model);
     dropHint.hidden = true;
     workspace.hidden = false;
 
+    const existing = sessions.findIndex(
+      session => session.name === file.name && session.file.size === file.size
+    );
+    if (existing >= 0) currentSession = existing;
+    else {
+      sessions.push({ name: file.name, file });
+      currentSession = sessions.length - 1;
+    }
+    renderSessionList();
+
+    state = new ScoutState();
     viewport = new Viewport();
     viewport.reset(model.durationMs);
 
-    const fpsCanvas = document.getElementById("fps-canvas") as HTMLCanvasElement;
-    const stripCanvas = document.getElementById("frame-strip") as HTMLCanvasElement;
-    const timelineCanvas = document.getElementById("timeline-canvas") as HTMLCanvasElement;
-    fpsChart = new FpsChart(fpsCanvas, viewport, model);
-    frameStrip = new FrameStrip(stripCanvas, viewport, model);
-    timeline = new Timeline(timelineCanvas, viewport, model);
-    timelineCanvas.style.height = `${timeline.preferredHeight()}px`;
+    const timelineCanvas = freshCanvas("timeline-canvas");
+    const stripCanvas = freshCanvas("strip-canvas");
+    timeline = new FrameTimeline(timelineCanvas, viewport, model, data, state, showTooltip, hideTooltip);
+    strip = new SessionSummary(stripCanvas, viewport, model, data, state);
+    applyChartToggles();
+
     preview = new SnapshotPreview(
       document.getElementById("preview")!,
       document.getElementById("preview-img") as HTMLImageElement,
@@ -202,97 +197,62 @@ async function openFile(file: File) {
     );
     if (preview.enabled) preview.showAt(model.snapTimesMs[0]);
 
+    summaryPanel = new SummaryPanel(document.getElementById("page-summary")!, model, data, state);
+    topActivities = new TopActivities(document.getElementById("page-top")!, model, data, state);
+    sequence = new ActivitySequence(document.getElementById("page-sequence")!, model, data, state);
+    topActivities.onActivityFilter = label => {
+      sequence!.activityFilter = label;
+      sequence!.render();
+    };
+    traceLog = new TraceLogPanel(document.getElementById("page-trace")!, model, data, state);
+    renderPanel = new RenderPanel(document.getElementById("page-render")!, model, state);
+    renderSessionInfo(document.getElementById("page-session")!, model, data, file.name);
+    renderSidebarCollectors();
+
     viewport.onChange(queueRedraw);
-    attachNavigation(fpsCanvas, viewport, LEFT_GUTTER);
-    attachNavigation(stripCanvas, viewport, LEFT_GUTTER, x => {
-      const index = frameStrip!.hitFrame(x);
-      if (index >= 0) void selectFrame(index);
+    state.onSelection(() => {
+      queueRedraw();
+      queuePanels();
+      const selection = state.selection;
+      if (selection && model)
+        preview?.showAt(model.frameTimesMs[selection.b] - model.frameDtMs[selection.b] / 2);
     });
-    attachNavigation(timelineCanvas, viewport, LEFT_GUTTER, (x, y) => {
-      const index = timeline!.hitTest(x, y);
-      if (index >= 0) void selectEvent(model!.seq[index]);
+    state.onFilter(() => {
+      queueRedraw();
+      queuePanels();
     });
-
-    // hover: scrub cursor + recording preview on every chart
-    fpsCanvas.addEventListener("pointermove", event => {
-      setCursor(msAt(fpsCanvas, event.clientX));
-    });
-    fpsCanvas.addEventListener("pointerleave", () => setCursor(null));
-
-    stripCanvas.addEventListener("pointermove", event => {
-      const rect = stripCanvas.getBoundingClientRect();
-      const index = frameStrip!.hitFrame(event.clientX - rect.left);
-      if (index !== frameStrip!.hoveredIndex) frameStrip!.hoveredIndex = index;
-      if (index >= 0) showTooltip(event.clientX, event.clientY, frameStrip!.describe(index));
-      else tooltip.hidden = true;
-      setCursor(msAt(stripCanvas, event.clientX));
-    });
-    stripCanvas.addEventListener("pointerleave", () => {
-      tooltip.hidden = true;
-      if (frameStrip) frameStrip.hoveredIndex = -1;
-      setCursor(null);
+    state.onHover(() => {
+      queueRedraw();
+      if (state.hoverMs !== null) preview?.showAt(state.hoverMs);
     });
 
-    timelineCanvas.addEventListener("pointermove", event => {
-      const rect = timelineCanvas.getBoundingClientRect();
-      const index = timeline!.hitTest(event.clientX - rect.left, event.clientY - rect.top);
-      if (index !== timeline!.hoveredIndex) timeline!.hoveredIndex = index;
-      if (index >= 0) showTooltip(event.clientX, event.clientY, timeline!.describe(index));
-      else tooltip.hidden = true;
-      setCursor(msAt(timelineCanvas, event.clientX));
-    });
-    timelineCanvas.addEventListener("pointerleave", () => {
-      tooltip.hidden = true;
-      if (timeline) timeline.hoveredIndex = -1;
-      setCursor(null);
-    });
+    await Promise.all([
+      renderRtmpTab(document.getElementById("page-rtmp")!, model.t0Us, selectFrameAtSeq),
+      renderLoadsTab(document.getElementById("page-loads")!, model.t0Us, selectFrameAtSeq)
+    ]);
 
-    document.getElementById("fps-summary")!.textContent = fpsChart.summary();
-    document.getElementById("event-summary")!.textContent =
-      `${model.count.toLocaleString("ru")} событий · ${formatMs(model.durationMs)}`;
-    updateFramesSummary();
     const started = model.meta.get("started_us");
     const version = model.meta.get("client_version") ?? "?";
-    sessionInfo.textContent = `${file.name} · v${version}${
+    sessionInfoEl.textContent = `${file.name} · v${version}${
       started ? ` · ${new Date(Number(started) / 1000).toLocaleString("ru")}` : ""
     }`;
 
-    status("строю дорожки метрик…");
-    const { series, flat } = await buildFrameSeries(model);
-    const lanesCanvas = document.getElementById("lanes-canvas") as HTMLCanvasElement;
-    lanes = new MetricLanes(lanesCanvas, viewport, model, series);
-    lanesCanvas.style.height = `${lanes.preferredHeight()}px`;
-    document.getElementById("lanes-summary")!.textContent =
-      `${series.length} рядов` + (flat.length ? ` · без движения: ${flat.join(", ")}` : "");
-    attachNavigation(lanesCanvas, viewport, LEFT_GUTTER, x => {
-      const rect = lanesCanvas.getBoundingClientRect();
-      const index = lanes!.frameIndexAt(viewport.msOf(x - LEFT_GUTTER, rect.width - LEFT_GUTTER));
-      if (index >= 0) void selectFrame(index);
-    });
-    lanesCanvas.addEventListener("pointermove", event => {
-      setCursor(msAt(lanesCanvas, event.clientX));
-    });
-    lanesCanvas.addEventListener("pointerleave", () => setCursor(null));
-
-    renderFramesTab(document.getElementById("frames-table")!, model, index =>
-      void selectFrame(index, true)
+    const frames = model.frameTimesMs.length;
+    const fps = frames > 1 ? (frames / model.durationMs) * 1000 : 0;
+    status(
+      `${frames.toLocaleString("ru")} кадров · ${model.count.toLocaleString("ru")} событий · ` +
+        `${formatMs(model.durationMs)} · средний ${fps.toFixed(1)} fps`
     );
-    await Promise.all([
-      renderGpuTab(document.getElementById("gpu-table")!, model, index =>
-        void selectFrame(index, true)
-      ),
-      renderRtmpTab(document.getElementById("rtmp-table")!, model.t0Us, selectEvent),
-      renderLoadsTab(document.getElementById("loads-table")!, model.t0Us, selectEvent),
-      renderSlowTab(document.getElementById("slow-table")!, model.t0Us, selectEvent)
-    ]);
 
-    status("готово");
+    queuePanels();
     queueRedraw();
   } catch (error) {
     console.error(error);
     status(`ошибка: ${error instanceof Error ? error.message : error}`);
   }
 }
+
+// ---- static wiring ---------------------------------------------------------
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
@@ -305,13 +265,31 @@ document.addEventListener("drop", event => {
   if (file) void openFile(file);
 });
 
-document.querySelectorAll<HTMLElement>("#tabs button").forEach(button => {
-  button.addEventListener("click", () => activateTab(button.dataset["tab"]!));
+// tab groups: any .tab-strip[data-group] switches its sibling .tab-pages
+document.querySelectorAll<HTMLElement>(".tab-strip[data-group]").forEach(strip_ => {
+  const pages = strip_.parentElement!.querySelector(".tab-pages")!;
+  strip_.querySelectorAll("button").forEach(button => {
+    button.addEventListener("click", () => {
+      strip_.querySelectorAll("button").forEach(other => other.classList.toggle("active", other === button));
+      pages.querySelectorAll(".tab-page").forEach(page => {
+        page.classList.toggle("active", page.id === `page-${button.dataset["tab"]}`);
+      });
+    });
+  });
 });
 
-document.getElementById("prev-slow")!.addEventListener("click", () => jumpSlow(-1));
-document.getElementById("next-slow")!.addEventListener("click", () => jumpSlow(1));
-slowThreshold.addEventListener("change", updateFramesSummary);
+document.getElementById("toggle-memory")!.addEventListener("click", event => {
+  if (!timeline) return;
+  timeline.showMemory = !timeline.showMemory;
+  (event.currentTarget as HTMLElement).classList.toggle("active", timeline.showMemory);
+  applyChartToggles();
+});
+document.getElementById("toggle-events")!.addEventListener("click", event => {
+  if (!timeline) return;
+  timeline.showEvents = !timeline.showEvents;
+  (event.currentTarget as HTMLElement).classList.toggle("active", timeline.showEvents);
+  applyChartToggles();
+});
 
 const sqlInput = document.getElementById("sql-input") as HTMLTextAreaElement;
 const runSqlNow = () => void runSql(document.getElementById("sql-result")!, sqlInput.value);
@@ -320,7 +298,13 @@ sqlInput.addEventListener("keydown", event => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") runSqlNow();
 });
 
-window.addEventListener("resize", queueRedraw);
+window.addEventListener("resize", () => {
+  applyChartToggles();
+  queueRedraw();
+});
+window.addEventListener("keydown", event => {
+  if (event.key === "Escape") state.setSelection(null);
+});
 
 void initEngine()
   .then(async () => {

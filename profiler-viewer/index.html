@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -27,77 +27,87 @@
     </div>
 
     <main id="workspace" hidden>
-      <section id="fps-section">
-        <div class="section-title">FPS <span id="fps-summary" class="dim"></span></div>
-        <canvas id="fps-canvas"></canvas>
+      <aside id="sidebar">
+        <div class="side-section">
+          <div class="side-title">⚙ Что записано в сессии</div>
+          <div id="side-collectors"></div>
+        </div>
+        <div class="side-note dim">
+          Состав записи задаётся сборкой (<code>--features profiler</code>) и флагами страницы
+          (<code>?rec=1</code> — запись экрана). Менять на лету нельзя.
+        </div>
+        <div class="side-spacer"></div>
+        <div class="side-section">
+          <div class="side-title">Сессии</div>
+          <div id="side-sessions"></div>
+        </div>
+      </aside>
+
+      <section id="strip-panel">
+        <canvas id="strip-canvas"></canvas>
       </section>
-      <section id="frames-section">
-        <div class="section-title">
-          Кадры
-          <span id="frames-summary" class="dim"></span>
-          <span class="frame-nav">
-            <button id="prev-slow" class="mini-button" title="предыдущий медленный кадр">⟨ медленный</button>
-            <select id="slow-threshold" class="mini-select" title="порог медленного кадра">
-              <option value="20">&gt;20 мс</option>
-              <option value="36">&gt;36 мс</option>
-              <option value="50" selected>&gt;50 мс</option>
-              <option value="100">&gt;100 мс</option>
-            </select>
-            <button id="next-slow" class="mini-button" title="следующий медленный кадр">медленный ⟩</button>
+
+      <section id="timeline-panel" class="panel">
+        <nav class="tab-strip">
+          <span class="tab-label active">Таймлайн кадров</span>
+          <span class="chart-toggles">
+            <button id="toggle-frames" class="chart-toggle active" disabled>Время кадра</button>
+            <button id="toggle-memory" class="chart-toggle active">Память</button>
+            <button id="toggle-events" class="chart-toggle active">События</button>
           </span>
-        </div>
-        <canvas id="frame-strip"></canvas>
-      </section>
-      <section id="lanes-section">
-        <div class="section-title">
-          Метрики
-          <span class="dim" id="lanes-summary"></span>
-          <span class="controls-hint">каждая дорожка в своём масштабе · наведите курсор — значения в этой точке времени</span>
-        </div>
-        <div id="lanes-wrap">
-          <canvas id="lanes-canvas"></canvas>
-        </div>
-      </section>
-      <section id="timeline-section">
-        <div class="section-title">
-          События
-          <span class="dim" id="event-summary"></span>
-          <span class="controls-hint">колесо — зум · перетаскивание — прокрутка · клик — детали</span>
-        </div>
-        <div id="timeline-wrap">
-          <canvas id="timeline-canvas"></canvas>
-        </div>
-      </section>
-      <section id="bottom">
-        <div id="bottom-main">
-        <nav id="tabs">
-          <button data-tab="details" class="active">Детали</button>
-          <button data-tab="frames">Кадры</button>
-          <button data-tab="gpu">GPU</button>
-          <button data-tab="rtmp">RTMP</button>
-          <button data-tab="loads">Загрузки</button>
-          <button data-tab="slow">Медленное</button>
-          <button data-tab="sql">SQL</button>
+          <span class="dim strip-hint">drag — выделение · клик — кадр · колесо — зум</span>
         </nav>
-        <div id="tab-details" class="tab active"><div id="details" class="details-empty">Кликните по кадру или событию на таймлайне.</div></div>
-        <div id="tab-frames" class="tab"><div id="frames-table"></div></div>
-        <div id="tab-gpu" class="tab"><div id="gpu-table"></div></div>
-        <div id="tab-rtmp" class="tab"><div id="rtmp-table"></div></div>
-        <div id="tab-loads" class="tab"><div id="loads-table"></div></div>
-        <div id="tab-slow" class="tab"><div id="slow-table"></div></div>
-        <div id="tab-sql" class="tab">
-          <div class="sql-bar">
-            <textarea id="sql-input" rows="3" spellcheck="false">SELECT source, cat, name, count(*) AS n, round(sum(dur_us)/1000.0, 1) AS total_ms
-FROM events GROUP BY 1,2,3 ORDER BY total_ms DESC LIMIT 30</textarea>
-            <button id="sql-run">Выполнить ⌘⏎</button>
-          </div>
-          <div id="sql-result"></div>
-        </div>
-        </div>
+        <canvas id="timeline-canvas"></canvas>
         <aside id="preview" hidden>
           <img id="preview-img" alt="кадр записи экрана">
           <div id="preview-caption" class="dim"></div>
         </aside>
+      </section>
+
+      <section id="right-top" class="panel">
+        <nav class="tab-strip" data-group="rt">
+          <button data-tab="summary" class="active">Сводка</button>
+          <button data-tab="session">Сессия</button>
+          <button data-tab="trace">Trace Log</button>
+        </nav>
+        <div class="tab-pages">
+          <div class="tab-page active" id="page-summary"></div>
+          <div class="tab-page" id="page-session"></div>
+          <div class="tab-page" id="page-trace"></div>
+        </div>
+      </section>
+
+      <section id="bottom-center" class="panel">
+        <nav class="tab-strip" data-group="bc">
+          <button data-tab="render" class="active">Рендер кадра</button>
+          <button data-tab="rtmp">RTMP</button>
+          <button data-tab="loads">Загрузки</button>
+          <button data-tab="sql">SQL</button>
+        </nav>
+        <div class="tab-pages">
+          <div class="tab-page active" id="page-render"></div>
+          <div class="tab-page" id="page-rtmp"></div>
+          <div class="tab-page" id="page-loads"></div>
+          <div class="tab-page" id="page-sql">
+            <div class="sql-bar">
+              <textarea id="sql-input" rows="3" spellcheck="false">SELECT source, cat, name, count(*) AS n, round(sum(dur_us)/1000.0, 1) AS total_ms
+FROM events GROUP BY 1,2,3 ORDER BY total_ms DESC LIMIT 30</textarea>
+              <button id="sql-run">Выполнить ⌘⏎</button>
+            </div>
+            <div id="sql-result"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="right-bottom" class="panel">
+        <nav class="tab-strip" data-group="rb">
+          <button data-tab="top" class="active">Топ активностей</button>
+          <button data-tab="sequence">Последовательность</button>
+        </nav>
+        <div class="tab-pages">
+          <div class="tab-page active" id="page-top"></div>
+          <div class="tab-page" id="page-sequence"></div>
+        </div>
       </section>
     </main>
     <div id="tooltip" hidden></div>
