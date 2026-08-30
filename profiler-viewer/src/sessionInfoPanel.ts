@@ -71,9 +71,26 @@ export function renderSessionInfo(
     ["Детектор блокировок", has((c, n) => c === "browser" && n === "stall"), "паузы главного потока ≥ ~30 мс"],
     ["Запись экрана", model.snapTimesMs.length > 0, `${model.snapTimesMs.length} кадров JPEG`],
     ["Трейсы игры", data.traces.length > 0, `${data.traces.length} строк (ExternalInterface)`],
-    ["CPU Usage", false, "не записывается этой сборкой"],
-    ["Сэмплер AVM-стека", false, "не записывается этой сборкой"],
-    ["Трекинг аллокаций", false, "не записывается этой сборкой"]
+    [
+      "Сэмплер AVM1-стека",
+      data.samplerBySeq.size > 0,
+      data.samplerBySeq.size > 0
+        ? `${data.samplerBySeq.size.toLocaleString("ru")} сэмплов (~1 мс)`
+        : "нужен бандл web-profiler от 30.08+"
+    ],
+    [
+      "Счётчики аллокаций",
+      data.counters.has("avm1_objects"),
+      data.counters.has("avm1_objects")
+        ? "объекты/массивы/функции AVM1 + куча gc-arena"
+        : "нужен бандл web-profiler от 30.08+"
+    ],
+    [
+      "Карта команд экрана",
+      data.screenGrid !== null,
+      data.screenGrid !== null ? "сетка 24×18 + бленды/маски" : "нужен бандл web-profiler от 30.08+"
+    ],
+    ["CPU Usage", false, "не записывается этой сборкой"]
   ];
   const list = el("div", "collector-list");
   for (const [name, present, note] of rows) {

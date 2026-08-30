@@ -219,6 +219,21 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
   cursor: pointer;
 }
 .mini-button.active { background: #2c4152; border-color: #3a6a8a; }
+.find-input {
+  background: #232523;
+  border: 1px solid #454745;
+  color: #cecbce;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+  width: 120px;
+}
+.find-input:focus { outline: none; border-color: #3a6a8a; }
+
+/* ---------- screen map ---------- */
+.screen-wrap { padding: 2px 0; }
+#screen-canvas { display: block; border-radius: 3px; cursor: crosshair; }
 
 /* ---------- summary panel ---------- */
 .sum-header {

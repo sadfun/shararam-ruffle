@@ -80,12 +80,14 @@
       <section id="bottom-center" class="panel">
         <nav class="tab-strip" data-group="bc">
           <button data-tab="render" class="active">Рендер кадра</button>
+          <button data-tab="screen">Экран</button>
           <button data-tab="rtmp">RTMP</button>
           <button data-tab="loads">Загрузки</button>
           <button data-tab="sql">SQL</button>
         </nav>
         <div class="tab-pages">
           <div class="tab-page active" id="page-render"></div>
+          <div class="tab-page" id="page-screen"></div>
           <div class="tab-page" id="page-rtmp"></div>
           <div class="tab-page" id="page-loads"></div>
           <div class="tab-page" id="page-sql">
@@ -103,10 +105,14 @@ FROM events GROUP BY 1,2,3 ORDER BY total_ms DESC LIMIT 30</textarea>
         <nav class="tab-strip" data-group="rb">
           <button data-tab="top" class="active">Топ активностей</button>
           <button data-tab="sequence">Последовательность</button>
+          <button data-tab="actionscript">ActionScript</button>
+          <button data-tab="alloc">Аллокации</button>
         </nav>
         <div class="tab-pages">
           <div class="tab-page active" id="page-top"></div>
           <div class="tab-page" id="page-sequence"></div>
+          <div class="tab-page" id="page-actionscript"></div>
+          <div class="tab-page" id="page-alloc"></div>
         </div>
       </section>
     </main>

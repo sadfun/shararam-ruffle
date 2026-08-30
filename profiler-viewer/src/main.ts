@@ -9,6 +9,9 @@ import { SessionSummary } from "./sessionSummary";
 import { SummaryPanel } from "./summaryPanel";
 import { TopActivities } from "./topActivities";
 import { ActivitySequence } from "./activitySequence";
+import { ActionScriptPanel } from "./actionScript";
+import { AllocationsPanel } from "./allocationsPanel";
+import { ScreenPanel } from "./screenPanel";
 import { TraceLogPanel } from "./traceLog";
 import { renderSessionInfo } from "./sessionInfoPanel";
 import { RenderPanel } from "./renderPanel";
@@ -31,6 +34,9 @@ let strip: SessionSummary | null = null;
 let summaryPanel: SummaryPanel | null = null;
 let topActivities: TopActivities | null = null;
 let sequence: ActivitySequence | null = null;
+let actionScript: ActionScriptPanel | null = null;
+let allocations: AllocationsPanel | null = null;
+let screenPanel: ScreenPanel | null = null;
 let traceLog: TraceLogPanel | null = null;
 let renderPanel: RenderPanel | null = null;
 let preview: SnapshotPreview | null = null;
@@ -66,6 +72,9 @@ function queuePanels() {
     summaryPanel?.render();
     topActivities?.render();
     sequence?.render();
+    actionScript?.render();
+    allocations?.render();
+    screenPanel?.render();
     traceLog?.render();
     void renderPanel?.render();
   });
@@ -134,8 +143,9 @@ function renderSidebarCollectors() {
     ["GPU-датчик (fence)", has(c => c === "gpu")],
     ["Детектор блокировок", has((c, n) => c === "browser" && n === "stall")],
     ["Запись экрана", model.snapTimesMs.length > 0],
-    ["Сэмплер AVM-стека", false],
-    ["Трекинг аллокаций", false]
+    ["Сэмплер AVM1-стека", data!.samplerBySeq.size > 0],
+    ["Счётчики аллокаций", data!.counters.has("avm1_objects")],
+    ["Карта команд экрана", data!.screenGrid !== null]
   ];
   for (const [name, present] of rows) {
     const row = document.createElement("div");
@@ -204,6 +214,16 @@ async function openFile(file: File) {
       sequence!.activityFilter = label;
       sequence!.render();
     };
+    actionScript = new ActionScriptPanel(document.getElementById("page-actionscript")!, model, data, state);
+    allocations = new AllocationsPanel(document.getElementById("page-alloc")!, model, data, state);
+    screenPanel = new ScreenPanel(
+      document.getElementById("page-screen")!,
+      model,
+      data,
+      state,
+      showTooltip,
+      hideTooltip
+    );
     traceLog = new TraceLogPanel(document.getElementById("page-trace")!, model, data, state);
     renderPanel = new RenderPanel(document.getElementById("page-render")!, model, state);
     renderSessionInfo(document.getElementById("page-session")!, model, data, file.name);

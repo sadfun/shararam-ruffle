@@ -20,6 +20,9 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 
 export class TopActivities {
   hideSmall = true;
+  /** find-bar substring filter (case-insensitive), empty = off */
+  findText = "";
+  private findFocused = false;
   /** activity label picked as a filter for the sequence panel, or null */
   activityFilter: string | null = null;
   onActivityFilter: (label: string | null) => void = () => {};
@@ -58,8 +61,10 @@ export class TopActivities {
     });
 
     const all = [...groups.values()].sort((x, y) => y.ms - x.ms);
-    const shown = this.hideSmall ? all.filter(group => group.ms >= SMALL_MS) : all;
-    const hidden = all.length - shown.length;
+    const needle = this.findText.trim().toLowerCase();
+    const found = needle ? all.filter(group => group.label.toLowerCase().includes(needle)) : all;
+    const shown = this.hideSmall && !needle ? found.filter(group => group.ms >= SMALL_MS) : found;
+    const hidden = found.length - shown.length;
 
     const toolbar = el("div", "panel-toolbar");
     const toggle = el("button", `mini-button${this.hideSmall ? " active" : ""}`, "скрывать мелкое");
@@ -69,6 +74,24 @@ export class TopActivities {
       this.render();
     });
     toolbar.appendChild(toggle);
+    const find = document.createElement("input");
+    find.className = "find-input";
+    find.placeholder = "найти…";
+    find.value = this.findText;
+    find.addEventListener("input", () => {
+      this.findText = find.value;
+      this.render();
+    });
+    find.addEventListener("focus", () => (this.findFocused = true));
+    find.addEventListener("blur", () => (this.findFocused = false));
+    toolbar.appendChild(find);
+    if (this.findFocused) {
+      queueMicrotask(() => {
+        find.focus();
+        find.setSelectionRange(find.value.length, find.value.length);
+      });
+    }
+    if (needle) toolbar.appendChild(el("span", "dim", `найдено: ${found.length}`));
     if (this.activityFilter) {
       const clear = el("button", "mini-button active", `фильтр: ${this.activityFilter} ✕`);
       clear.addEventListener("click", () => {

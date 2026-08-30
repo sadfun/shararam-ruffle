@@ -30,6 +30,10 @@ export const TRACE_COLOR = "#e8a33d";
  */
 export function categoryOfKind(kind: Kind): number {
   if (kind.source === "ruffle") {
+    // AVM1 stack samples span the same wall time as the script spans they
+    // sample, and the screen grid is bookkeeping — never main-thread work.
+    if (kind.cat === "sampler") return -1;
+    if (kind.cat === "render" && kind.name === "screen_grid") return -1;
     switch (kind.cat) {
       case "script":
       case "input":
@@ -106,7 +110,9 @@ const ACTIVITY_NAMES: Record<string, string> = {
   "http/fetch": "Сетевой запрос",
   "browser/stall": "Блокировка потока (неинструментировано)",
   "rec/capture": "Захват кадра записи экрана",
-  "profiler/installed": "Профайлер установлен"
+  "profiler/installed": "Профайлер установлен",
+  "sampler/avm1": "Сэмпл AVM1-стека",
+  "render/screen_grid": "Карта команд экрана"
 };
 
 export function activityName(kind: Kind): string {

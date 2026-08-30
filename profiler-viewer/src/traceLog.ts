@@ -16,6 +16,8 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 
 export class TraceLogPanel {
   showTimestamps = true;
+  findText = "";
+  private findFocused = false;
 
   constructor(
     private container: HTMLElement,
@@ -40,14 +42,33 @@ export class TraceLogPanel {
       this.render();
     });
     toolbar.appendChild(toggle);
+    const find = document.createElement("input");
+    find.className = "find-input";
+    find.placeholder = "найти…";
+    find.value = this.findText;
+    find.addEventListener("input", () => {
+      this.findText = find.value;
+      this.render();
+    });
+    find.addEventListener("focus", () => (this.findFocused = true));
+    find.addEventListener("blur", () => (this.findFocused = false));
+    toolbar.appendChild(find);
+    if (this.findFocused) {
+      queueMicrotask(() => {
+        find.focus();
+        find.setSelectionRange(find.value.length, find.value.length);
+      });
+    }
     toolbar.appendChild(el("span", "spacer"));
     toolbar.appendChild(el("span", "dim", selection ? "trace из выделения" : "trace всей сессии"));
     container.appendChild(toolbar);
 
+    const needle = this.findText.trim().toLowerCase();
     const field = el("div", "trace-field");
     let shown = 0;
     for (const trace of this.data.traces) {
       if (trace.tsMs < aMs || trace.tsMs > bMs) continue;
+      if (needle && !trace.text.toLowerCase().includes(needle)) continue;
       shown++;
       const line = el("div", "trace-line");
       if (this.showTimestamps) line.appendChild(el("span", "trace-ts", formatClock(trace.tsMs)));
@@ -62,7 +83,14 @@ export class TraceLogPanel {
       });
       field.appendChild(line);
     }
-    if (!shown) field.appendChild(el("div", "trace-empty", selection ? "в выделении trace-строк нет" : "trace-строк нет"));
+    if (!shown)
+      field.appendChild(
+        el(
+          "div",
+          "trace-empty",
+          needle ? "ничего не найдено" : selection ? "в выделении trace-строк нет" : "trace-строк нет"
+        )
+      );
     container.appendChild(field);
   }
 }

@@ -172,6 +172,10 @@ export class FrameTimeline {
       if (ms >= 0.5) parts.push(`${category.label} ${formatMs(ms)}`);
     });
     if (this.data.gpuWaitMs[index] >= 1) parts.push(`ожидание GPU ${formatMs(this.data.gpuWaitMs[index])}`);
+    if (!Number.isNaN(this.data.gcHeapMb[index]))
+      parts.push(`куча gc ${this.data.gcHeapMb[index].toFixed(1)} МБ`);
+    const objects = this.data.counters.get("avm1_objects");
+    if (objects && objects[index] > 0) parts.push(`аллокаций AVM1 ${objects[index]}`);
     return parts.join("\n");
   }
 
@@ -223,7 +227,16 @@ export class FrameTimeline {
     ctx.fillText(`${Math.round(this.yMax)} мс`, 6, frameTop + 24);
     if (this.showMemory) {
       ctx.fillText("Память", 6, memoryTop + 12);
-      ctx.fillText(`${Math.round(this.data.memoryMaxMb)} МБ`, 6, memoryTop + 24);
+      ctx.fillText(
+        `${Math.round(Math.max(this.data.memoryMaxMb, this.data.gcHeapMaxMb))} МБ`,
+        6,
+        memoryTop + 24
+      );
+      if (this.data.gcHeapMaxMb > 0) {
+        ctx.fillStyle = "#7fd4de";
+        ctx.fillText("— куча gc", 6, memoryTop + 36);
+        ctx.fillStyle = "#8f918f";
+      }
     }
 
     const yOf = (ms: number) =>
@@ -320,7 +333,10 @@ export class FrameTimeline {
     ctx.lineWidth = 1;
 
     // ---- memory ----------------------------------------------------------
-    if (this.showMemory && this.data.memoryMaxMb > 0) {
+    // wasm memory as teal bars; the gc-arena heap (when recorded) as a
+    // lighter line on the same MB scale, so growth is directly comparable
+    const memoryScaleMb = Math.max(this.data.memoryMaxMb, this.data.gcHeapMaxMb);
+    if (this.showMemory && memoryScaleMb > 0) {
       ctx.fillStyle = "#108a94";
       for (let i = from; i < to; i++) {
         const mb = this.data.memoryMb[i];
@@ -329,8 +345,26 @@ export class FrameTimeline {
         const x0 = Math.max(LEFT_GUTTER + viewport.xOf(s0, plotWidth), LEFT_GUTTER);
         const x1 = LEFT_GUTTER + viewport.xOf(s1, plotWidth);
         if (x1 < LEFT_GUTTER || x0 > width) continue;
-        const h = (mb / this.data.memoryMaxMb) * (MEMORY_H - 8);
+        const h = (mb / memoryScaleMb) * (MEMORY_H - 8);
         ctx.fillRect(x0, memoryBottom - h, Math.max(x1 - x0, 1), h);
+      }
+      if (this.data.gcHeapMaxMb > 0) {
+        ctx.strokeStyle = "#7fd4de";
+        ctx.beginPath();
+        let started = false;
+        for (let i = from; i < to; i++) {
+          const mb = this.data.gcHeapMb[i];
+          if (Number.isNaN(mb)) continue;
+          const x = LEFT_GUTTER + viewport.xOf(times[i], plotWidth);
+          if (x < LEFT_GUTTER || x > width) continue;
+          const y = memoryBottom - (mb / memoryScaleMb) * (MEMORY_H - 8);
+          if (started) ctx.lineTo(x, y);
+          else {
+            ctx.moveTo(x, y);
+            started = true;
+          }
+        }
+        ctx.stroke();
       }
     }
 

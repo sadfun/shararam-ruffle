@@ -24,6 +24,21 @@ export interface TraceLine {
 export const TRACK_LABELS = ["Мышь", "Клавиатура", "Сеть", "Таймеры", "Рендер", "Trace"];
 export const TRACK_ICONS = ["🖱", "⌨", "🌐", "⏱", "🎨", "💬"];
 
+/** Aggregated `render/screen_grid` events: where draw commands land. */
+export interface ScreenGridData {
+  gw: number;
+  gh: number;
+  /** per frame: gw*gh cell draw counts, frame-major */
+  draws: Uint32Array;
+  /** same, but only commands inside blend/alpha-mask subtrees */
+  heavy: Uint32Array;
+  /** per frame: viewport pixel size the grid was recorded against */
+  viewportW: Float32Array;
+  viewportH: Float32Array;
+  /** per frame: blend/alpha-mask subtrees with screen rects [x,y,w,h,kind] */
+  hotByFrame: Map<number, [number, number, number, number, string][]>;
+}
+
 export interface FrameData {
   /** per frame, per category: attributed self-time ms */
   catMs: Float64Array[];
@@ -34,6 +49,16 @@ export interface FrameData {
   /** per frame: wasm memory MB carried forward (NaN before first sample) */
   memoryMb: Float64Array;
   memoryMaxMb: number;
+  /** per frame: gc-arena heap MB carried forward (NaN if not recorded) */
+  gcHeapMb: Float64Array;
+  gcHeapMaxMb: number;
+  /** per-frame counter deltas from the ruffle render-event args
+   *  (avm1_objects, shapes_registered, gc_bytes excluded, …) */
+  counters: Map<string, Float64Array>;
+  /** AVM1 stack samples by event seq: collapsed stack + allocations */
+  samplerBySeq: Map<number, { stack: string; alloc: number }>;
+  /** screen-grid aggregates, or null when the profile has none */
+  screenGrid: ScreenGridData | null;
   /** per track (TRACK_LABELS), per frame: event count */
   tracks: Uint16Array[];
   /** per event: self time ms (0 for non-main-thread events) */
@@ -169,6 +194,133 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     }
   }
 
+  // ---- per-frame counters + gc heap from the ruffle render event ---------
+  const gcHeapMb = new Float64Array(n).fill(NaN);
+  let gcHeapMaxMb = 0;
+  const counters = new Map<string, Float64Array>();
+  try {
+    const { rows } = await query(
+      `SELECT ts_us, args FROM events
+       WHERE source = 'ruffle' AND cat = 'render' AND name = 'render' AND args IS NOT NULL
+       ORDER BY ts_us`
+    );
+    for (const row of rows) {
+      const tsMs = (toNumber(row["ts_us"]) - model.t0Us) / 1000;
+      const f = frameAt(tsMs);
+      if (f < 0) continue;
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(String(row["args"])) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      for (const [key, value] of Object.entries(args)) {
+        if (typeof value !== "number") continue;
+        if (key === "gc_bytes") {
+          gcHeapMb[f] = value / 1048576;
+          continue;
+        }
+        let series = counters.get(key);
+        if (!series) counters.set(key, (series = new Float64Array(n)));
+        series[f] += value;
+      }
+    }
+    // carry the gc heap gauge forward through frames without a ruffle render
+    let current = NaN;
+    for (let f = 0; f < n; f++) {
+      if (!Number.isNaN(gcHeapMb[f])) current = gcHeapMb[f];
+      else gcHeapMb[f] = current;
+      if (!Number.isNaN(current) && current > gcHeapMaxMb) gcHeapMaxMb = current;
+    }
+  } catch {
+    /* profile without args */
+  }
+
+  // ---- AVM1 stack samples ------------------------------------------------
+  const samplerBySeq = new Map<number, { stack: string; alloc: number }>();
+  try {
+    const { rows } = await query(
+      `SELECT seq, args FROM events
+       WHERE source = 'ruffle' AND cat = 'sampler' AND name = 'avm1' AND args IS NOT NULL`
+    );
+    for (const row of rows) {
+      try {
+        const args = JSON.parse(String(row["args"])) as Record<string, unknown>;
+        const stack = String(args["stack"] ?? "");
+        if (!stack) continue;
+        samplerBySeq.set(toNumber(row["seq"]), {
+          stack,
+          alloc: typeof args["alloc"] === "number" ? args["alloc"] : 0
+        });
+      } catch {
+        /* skip malformed */
+      }
+    }
+  } catch {
+    /* profile without sampler */
+  }
+
+  // ---- screen grid -------------------------------------------------------
+  let screenGrid: ScreenGridData | null = null;
+  try {
+    const { rows } = await query(
+      `SELECT ts_us, args FROM events
+       WHERE source = 'ruffle' AND cat = 'render' AND name = 'screen_grid' AND args IS NOT NULL
+       ORDER BY ts_us`
+    );
+    for (const row of rows) {
+      let args: {
+        vw?: number;
+        vh?: number;
+        gw?: number;
+        gh?: number;
+        draws?: number[];
+        heavy?: [number, number][];
+        hot?: [number, number, number, number, string][];
+      };
+      try {
+        args = JSON.parse(String(row["args"]));
+      } catch {
+        continue;
+      }
+      const gw = args.gw ?? 0;
+      const gh = args.gh ?? 0;
+      if (!gw || !gh || !Array.isArray(args.draws)) continue;
+      if (!screenGrid) {
+        screenGrid = {
+          gw,
+          gh,
+          draws: new Uint32Array(n * gw * gh),
+          heavy: new Uint32Array(n * gw * gh),
+          viewportW: new Float32Array(n),
+          viewportH: new Float32Array(n),
+          hotByFrame: new Map()
+        };
+      }
+      if (gw !== screenGrid.gw || gh !== screenGrid.gh) continue;
+      const tsMs = (toNumber(row["ts_us"]) - model.t0Us) / 1000;
+      const f = frameAt(tsMs);
+      if (f < 0) continue;
+      const base = f * gw * gh;
+      const cells = Math.min(args.draws.length, gw * gh);
+      for (let c = 0; c < cells; c++) screenGrid.draws[base + c] += args.draws[c];
+      if (Array.isArray(args.heavy)) {
+        for (const [cell, count] of args.heavy) {
+          if (cell >= 0 && cell < gw * gh) screenGrid.heavy[base + cell] += count;
+        }
+      }
+      screenGrid.viewportW[f] = args.vw ?? 0;
+      screenGrid.viewportH[f] = args.vh ?? 0;
+      if (Array.isArray(args.hot) && args.hot.length) {
+        const list = screenGrid.hotByFrame.get(f) ?? [];
+        for (const rect of args.hot) list.push(rect);
+        screenGrid.hotByFrame.set(f, list);
+      }
+    }
+  } catch {
+    /* profile without screen grid */
+  }
+
   // ---- args-dependent extras: input kinds, traces, mouse/key tracks ------
   const labelBySeq = new Map<number, string>();
   const traces: TraceLine[] = [];
@@ -217,6 +369,11 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     gpuWaitMs,
     memoryMb,
     memoryMaxMb,
+    gcHeapMb,
+    gcHeapMaxMb,
+    counters,
+    samplerBySeq,
+    screenGrid,
     tracks,
     selfMs,
     eventCat,
