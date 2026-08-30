@@ -329,6 +329,7 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
       `SELECT seq, ts_us, cat, name, args FROM events
        WHERE (cat = 'input' AND name = 'handle_event')
           OR (cat = 'external' AND name = 'call_out')
+          OR (cat = 'script' AND name = 'array_sort')
           OR cat = 'marker'
        ORDER BY ts_us`
     );
@@ -349,6 +350,11 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
           if (kind.startsWith("mouse")) tracks[0][f]++;
           else if (kind.startsWith("key")) tracks[1][f]++;
         }
+      } else if (row["cat"] === "script") {
+        labelBySeq.set(
+          seq,
+          `Array.sort (n=${args["n"] ?? "?"}${args["sort_on"] ? ", sortOn" : ""})`
+        );
       } else if (row["cat"] === "external") {
         const target = String(args["name"] ?? "");
         const callArgs = Array.isArray(args["args"]) ? (args["args"] as unknown[]) : [];

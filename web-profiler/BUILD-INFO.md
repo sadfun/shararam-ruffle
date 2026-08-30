@@ -6,8 +6,9 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `9dd779161` (adds the AVM1 stack sampler, allocation counters
-  and the screen command grid — see `docs/SHARARAM-PROFILER.md`)
+- revision: `27f7d9a7f` (AVM1 stack sampler with position labels for
+  anonymous functions, allocation counters, screen command grid,
+  Array.sort span — see `docs/SHARARAM-PROFILER.md`)
 - build: `cd web && npm run build:shararam-profiler`
   (release profile + wasm-opt, identical to a regular build except for the
   `shararam_profiler` cargo feature)

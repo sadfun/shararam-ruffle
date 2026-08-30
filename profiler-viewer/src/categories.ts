@@ -79,6 +79,7 @@ const ACTIVITY_NAMES: Record<string, string> = {
   "script/rtmp_responder": "RTMP-ответ (responder)",
   "script/rtmp_connected": "RTMP-подключение",
   "script/load_vars_on_data": "LoadVars: onData",
+  "script/array_sort": "Array.sort (нативная сортировка)",
   "input/mouse_pick": "Hit-тест кнопок",
   "input/handle_event": "Обработка события",
   "external/call_out": "ExternalInterface",
