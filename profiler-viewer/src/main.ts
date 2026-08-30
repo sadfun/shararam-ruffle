@@ -16,7 +16,8 @@ import {
   renderDetails,
   runSql
 } from "./tables";
-import { buildDiagnosis, renderEpisodesTab } from "./episodes";
+import { buildFrameSeries } from "./metrics";
+import { MetricLanes } from "./lanes";
 
 const statusEl = document.getElementById("status")!;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
@@ -30,6 +31,7 @@ let model: ProfileModel | null = null;
 let viewport = new Viewport();
 let fpsChart: FpsChart | null = null;
 let frameStrip: FrameStrip | null = null;
+let lanes: MetricLanes | null = null;
 let timeline: Timeline | null = null;
 let preview: SnapshotPreview | null = null;
 let redrawQueued = false;
@@ -45,6 +47,7 @@ function queueRedraw() {
     redrawQueued = false;
     fpsChart?.draw();
     frameStrip?.draw();
+    lanes?.draw();
     timeline?.draw();
   });
 }
@@ -62,6 +65,7 @@ function activateTab(name: string) {
 function setCursor(ms: number | null) {
   if (fpsChart) fpsChart.cursorMs = ms;
   if (frameStrip) frameStrip.cursorMs = ms;
+  if (lanes) lanes.cursorMs = ms;
   if (timeline) timeline.cursorMs = ms;
   if (ms !== null) preview?.showAt(ms);
   queueRedraw();
@@ -253,27 +257,22 @@ async function openFile(file: File) {
       started ? ` · ${new Date(Number(started) / 1000).toLocaleString("ru")}` : ""
     }`;
 
-    status("ищу эпизоды…");
-    const diagnosis = await buildDiagnosis(model);
-    fpsChart.episodes = diagnosis.episodes;
-    renderEpisodesTab(
-      document.getElementById("episodes")!,
-      model,
-      diagnosis,
-      index => void selectFrame(index, true),
-      (startMs, endMs) => {
-        if (!timeline || !frameStrip) return;
-        frameStrip.selectedIndex = -1;
-        timeline.selectedIndex = -1;
-        timeline.highlightSpan = [startMs, endMs];
-        const span = Math.max((endMs - startMs) * 1.6, 1500);
-        const center = (startMs + endMs) / 2;
-        viewport.setRange(center - span / 2, center + span / 2);
-        preview?.showAt(center);
-        queueRedraw();
-      }
-    );
-    if (diagnosis.episodes.length) activateTab("episodes");
+    status("строю дорожки метрик…");
+    const { series, flat } = await buildFrameSeries(model);
+    const lanesCanvas = document.getElementById("lanes-canvas") as HTMLCanvasElement;
+    lanes = new MetricLanes(lanesCanvas, viewport, model, series);
+    lanesCanvas.style.height = `${lanes.preferredHeight()}px`;
+    document.getElementById("lanes-summary")!.textContent =
+      `${series.length} рядов` + (flat.length ? ` · без движения: ${flat.join(", ")}` : "");
+    attachNavigation(lanesCanvas, viewport, LEFT_GUTTER, x => {
+      const rect = lanesCanvas.getBoundingClientRect();
+      const index = lanes!.frameIndexAt(viewport.msOf(x - LEFT_GUTTER, rect.width - LEFT_GUTTER));
+      if (index >= 0) void selectFrame(index);
+    });
+    lanesCanvas.addEventListener("pointermove", event => {
+      setCursor(msAt(lanesCanvas, event.clientX));
+    });
+    lanesCanvas.addEventListener("pointerleave", () => setCursor(null));
 
     renderFramesTab(document.getElementById("frames-table")!, model, index =>
       void selectFrame(index, true)
