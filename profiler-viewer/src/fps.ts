@@ -11,6 +11,8 @@ const SLOW_FRAME_MS = 50;
 export class FpsChart {
   /** shared scrub cursor (profile ms) */
   cursorMs: number | null = null;
+  /** framerate-deviation episodes, shaded as bands */
+  episodes: { startMs: number; endMs: number }[] = [];
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -60,6 +62,14 @@ export class FpsChart {
       ctx.lineTo(width, y);
       ctx.stroke();
       ctx.fillText(`${fps}`, LEFT_GUTTER - 22, y + 3);
+    }
+
+    ctx.fillStyle = "rgba(230, 103, 103, 0.10)";
+    for (const episode of this.episodes) {
+      const x0 = LEFT_GUTTER + this.viewport.xOf(episode.startMs, plotWidth);
+      const x1 = LEFT_GUTTER + this.viewport.xOf(episode.endMs, plotWidth);
+      if (x1 < LEFT_GUTTER || x0 > width) continue;
+      ctx.fillRect(Math.max(x0, LEFT_GUTTER), axisTop, Math.max(x1 - x0, 2), plotHeight);
     }
 
     const times = this.model.frameTimesMs;

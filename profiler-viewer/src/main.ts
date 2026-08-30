@@ -16,6 +16,7 @@ import {
   renderDetails,
   runSql
 } from "./tables";
+import { buildDiagnosis, renderEpisodesTab } from "./episodes";
 
 const statusEl = document.getElementById("status")!;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
@@ -251,6 +252,28 @@ async function openFile(file: File) {
     sessionInfo.textContent = `${file.name} · v${version}${
       started ? ` · ${new Date(Number(started) / 1000).toLocaleString("ru")}` : ""
     }`;
+
+    status("ищу эпизоды…");
+    const diagnosis = await buildDiagnosis(model);
+    fpsChart.episodes = diagnosis.episodes;
+    renderEpisodesTab(
+      document.getElementById("episodes")!,
+      model,
+      diagnosis,
+      index => void selectFrame(index, true),
+      (startMs, endMs) => {
+        if (!timeline || !frameStrip) return;
+        frameStrip.selectedIndex = -1;
+        timeline.selectedIndex = -1;
+        timeline.highlightSpan = [startMs, endMs];
+        const span = Math.max((endMs - startMs) * 1.6, 1500);
+        const center = (startMs + endMs) / 2;
+        viewport.setRange(center - span / 2, center + span / 2);
+        preview?.showAt(center);
+        queueRedraw();
+      }
+    );
+    if (diagnosis.episodes.length) activateTab("episodes");
 
     renderFramesTab(document.getElementById("frames-table")!, model, index =>
       void selectFrame(index, true)

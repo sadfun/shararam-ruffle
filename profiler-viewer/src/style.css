@@ -134,6 +134,27 @@ table.grid tr.clickable:hover td { background: var(--surface-3); }
 .pill-send { color: #3987e5; }
 .pill-recv { color: #d55181; }
 
+/* episode diagnosis */
+.ep-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; align-items: center; }
+.ep-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface-3); border: 1px solid var(--border); border-radius: 14px;
+  padding: 3px 10px; cursor: pointer; font: 600 11.5px/1.4 inherit; color: var(--text-2);
+  font-family: ui-monospace, Menlo, monospace;
+}
+.ep-chip:hover { color: var(--text); border-color: var(--text-3); }
+.ep-chip.active { border-color: var(--accent); color: var(--text); }
+.ep-card {
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  background: var(--surface);
+}
+.ep-verdict { font-weight: 700; margin: 2px 0 6px; }
+.ep-flag { color: var(--text-2); font-size: 12px; margin: 2px 0; }
+.ep-section-title { color: var(--text-2); font-weight: 600; font-size: 12px; margin: 10px 0 4px; }
+.dev-up { color: #e66767; font-weight: 700; }
+.dev-down { color: #7d7f83; }
+.dev-new { color: #c98500; font-weight: 700; }
+
 .details-empty { color: var(--text-3); padding: 16px; }
 .details-header { margin-bottom: 6px; }
 .details-name { font-weight: 700; font-family: ui-monospace, Menlo, monospace; }
