@@ -171,11 +171,29 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
   // A stall overlapping ruffle host_tick spans means the main thread froze
   // inside our frame code (uninstrumented wasm/page work); a stall outside
   // any tick means the browser itself held the thread (compositor, its GC).
+  // A "stall" whose window contains rAF frames is not a freeze at all: the
+  // thread kept rendering and only the heartbeat timer was late — WebKit
+  // throttles DOM timers under load. Those are measurement artifacts: they
+  // are labeled as such and excluded from category time (the real work of
+  // those frames is already accounted for by its own spans).
+  const throttleSeqs = new Set<number>();
+  const throttleIdx = new Set<number>();
   const tickStartsSorted = Float64Array.from(tickStarts);
   for (const index of stallIndexes) {
     const s = model.startMs[index];
     const e = s + Math.min(Math.max(model.durMs[index], 0), SPAN_CAP_MS);
     if (e <= s) continue;
+    const framesInside = lowerBound(ends, e) - lowerBound(ends, s);
+    if (framesInside >= 2) {
+      throttleSeqs.add(model.seq[index]);
+      throttleIdx.add(index);
+      eventCat[index] = -1;
+      labelBySeq.set(
+        model.seq[index],
+        "Задержка таймера (rAF шёл — троттлинг WebKit, не заморозка)"
+      );
+      continue;
+    }
     addToFrames(stallMs, s, e);
     let overlap = 0;
     let t = lowerBound(tickStartsSorted, s - SPAN_CAP_MS);
@@ -204,7 +222,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
   // Tie-break by seq DESC: spans are recorded at close, children close
   // first, so at equal timing the later-written span is the ancestor.
   const seq = model.seq;
-  sweep.sort((a, b) => a.start - b.start || b.end - a.end || seq[b.idx] - seq[a.idx]);
+  const sweepReal = throttleIdx.size ? sweep.filter(span => !throttleIdx.has(span.idx)) : sweep;
+  sweepReal.sort((a, b) => a.start - b.start || b.end - a.end || seq[b.idx] - seq[a.idx]);
   const stack: { end: number; cursor: number; cat: number; idx: number }[] = [];
   const attribute = (a: number, b: number, cat: number, idx: number) => {
     if (b <= a) return;
@@ -212,7 +231,7 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     addToFrames(catMs[cat], a, b);
   };
   const EPS = 0.0005;
-  for (const span of sweep) {
+  for (const span of sweepReal) {
     while (stack.length && stack[stack.length - 1].end <= span.start + EPS) {
       const top = stack.pop()!;
       attribute(top.cursor, top.end, top.cat, top.idx);
@@ -445,6 +464,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
           `Array.sort (n=${args["n"] ?? "?"}${args["sort_on"] ? ", sortOn" : ""})`
         );
       } else if (row["cat"] === "browser") {
+        // timer-throttle artifacts keep their label from the classification
+        if (throttleSeqs.has(seq)) continue;
         // phase recorded by the worker sampler at freeze time (see
         // web/profiler.js); more precise than the tick-overlap fallback
         const PHASE_LABELS: Record<string, string> = {
