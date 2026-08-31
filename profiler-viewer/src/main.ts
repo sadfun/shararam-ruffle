@@ -145,7 +145,9 @@ function renderSidebarCollectors() {
     ["Запись экрана", model.snapTimesMs.length > 0],
     ["Сэмплер AVM1-стека", data!.samplerBySeq.size > 0],
     ["Счётчики аллокаций", data!.counters.has("avm1_objects")],
-    ["Карта команд экрана", data!.screenGrid !== null]
+    ["Карта команд экрана", data!.screenGrid !== null],
+    ["CPU процессов", data!.cpu.size > 0],
+    ["Сэмплер фаз потока", has((c, n) => c === "marker" && n === "phase_sampler_start")]
   ];
   for (const [name, present] of rows) {
     const row = document.createElement("div");
@@ -197,6 +199,9 @@ async function openFile(file: File) {
     const stripCanvas = freshCanvas("strip-canvas");
     timeline = new FrameTimeline(timelineCanvas, viewport, model, data, state, showTooltip, hideTooltip);
     strip = new SessionSummary(stripCanvas, viewport, model, data, state);
+    const cpuToggle = document.getElementById("toggle-cpu") as HTMLButtonElement;
+    cpuToggle.disabled = data.cpu.size === 0;
+    cpuToggle.title = data.cpu.size === 0 ? "CPU процессов не записан в этом профиле" : "";
     applyChartToggles();
 
     preview = new SnapshotPreview(
@@ -302,6 +307,12 @@ document.getElementById("toggle-memory")!.addEventListener("click", event => {
   if (!timeline) return;
   timeline.showMemory = !timeline.showMemory;
   (event.currentTarget as HTMLElement).classList.toggle("active", timeline.showMemory);
+  applyChartToggles();
+});
+document.getElementById("toggle-cpu")!.addEventListener("click", event => {
+  if (!timeline) return;
+  timeline.showCpu = !timeline.showCpu;
+  (event.currentTarget as HTMLElement).classList.toggle("active", timeline.showCpu);
   applyChartToggles();
 });
 document.getElementById("toggle-events")!.addEventListener("click", event => {

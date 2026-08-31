@@ -17,12 +17,21 @@ export const LEFT_GUTTER = 78;
 const RULER_H = 20;
 const FRAME_H = 140;
 const MEMORY_H = 56;
+const CPU_H = 48;
 const TRACK_H = 15;
 const SCROLL_H = 12;
 const GAP_MS = 500;
 
+/** process key → display label + line color for the CPU chart */
+const CPU_SERIES: [string, string, string][] = [
+  ["webcontent", "страница", "#e8c95a"],
+  ["gpu", "gpu-процесс", "#c084e0"],
+  ["client", "клиент", "#9a9c9a"]
+];
+
 export class FrameTimeline {
   showMemory = true;
+  showCpu = true;
   showEvents = true;
   private yMax: number;
   private dragStartMs: number | null = null;
@@ -45,11 +54,16 @@ export class FrameTimeline {
     this.attach();
   }
 
+  private cpuOn(): boolean {
+    return this.showCpu && this.data.cpu.size > 0;
+  }
+
   preferredHeight(): number {
     return (
       RULER_H +
       FRAME_H +
       (this.showMemory ? MEMORY_H : 0) +
+      (this.cpuOn() ? CPU_H : 0) +
       (this.showEvents ? TRACK_H * TRACK_LABELS.length : 0) +
       SCROLL_H +
       6
@@ -172,10 +186,26 @@ export class FrameTimeline {
       if (ms >= 0.5) parts.push(`${category.label} ${formatMs(ms)}`);
     });
     if (this.data.gpuWaitMs[index] >= 1) parts.push(`ожидание GPU ${formatMs(this.data.gpuWaitMs[index])}`);
+    if (this.data.stallMs[index] >= 1) {
+      const outMs = this.data.stallMs[index] - this.data.stallInTickMs[index];
+      parts.push(
+        `блокировка ${formatMs(this.data.stallMs[index])}` +
+          (outMs >= 0.5 ? ` (вне тика ${formatMs(outMs)})` : "")
+      );
+    }
     if (!Number.isNaN(this.data.gcHeapMb[index]))
       parts.push(`куча gc ${this.data.gcHeapMb[index].toFixed(1)} МБ`);
     const objects = this.data.counters.get("avm1_objects");
     if (objects && objects[index] > 0) parts.push(`аллокаций AVM1 ${objects[index]}`);
+    if (this.data.cpu.size) {
+      const cpuParts = CPU_SERIES.filter(([key]) => this.data.cpu.has(key))
+        .map(([key, label]) => {
+          const pct = this.data.cpu.get(key)![index];
+          return Number.isNaN(pct) ? null : `${label} ${Math.round(pct)}%`;
+        })
+        .filter(Boolean);
+      if (cpuParts.length) parts.push(`CPU: ${cpuParts.join(" · ")}`);
+    }
     return parts.join("\n");
   }
 
@@ -215,11 +245,15 @@ export class FrameTimeline {
     const frameBottom = frameTop + FRAME_H;
     const memoryTop = frameBottom + 1;
     const memoryBottom = memoryTop + (this.showMemory ? MEMORY_H : 0);
-    const tracksTop = memoryBottom + 1;
+    const cpuOn = this.cpuOn();
+    const cpuTop = memoryBottom + 1;
+    const cpuBottom = cpuTop + (cpuOn ? CPU_H : 0);
+    const tracksTop = cpuBottom + 1;
 
     ctx.fillStyle = "#232523";
     ctx.fillRect(LEFT_GUTTER, frameTop, plotWidth, FRAME_H);
     if (this.showMemory) ctx.fillRect(LEFT_GUTTER, memoryTop, plotWidth, MEMORY_H);
+    if (cpuOn) ctx.fillRect(LEFT_GUTTER, cpuTop, plotWidth, CPU_H);
 
     // gutter labels
     ctx.fillStyle = "#8f918f";
@@ -250,7 +284,7 @@ export class FrameTimeline {
       const x1 = Math.min(LEFT_GUTTER + viewport.xOf(s1, plotWidth), width);
       if (x1 > x0) {
         ctx.fillStyle = "rgba(33, 158, 222, 0.13)";
-        ctx.fillRect(x0, frameTop, x1 - x0, (this.showEvents ? tracksTop + TRACK_H * TRACK_LABELS.length : memoryBottom) - frameTop);
+        ctx.fillRect(x0, frameTop, x1 - x0, (this.showEvents ? tracksTop + TRACK_H * TRACK_LABELS.length : cpuBottom) - frameTop);
       }
     }
 
@@ -358,6 +392,40 @@ export class FrameTimeline {
           const x = LEFT_GUTTER + viewport.xOf(times[i], plotWidth);
           if (x < LEFT_GUTTER || x > width) continue;
           const y = memoryBottom - (mb / memoryScaleMb) * (MEMORY_H - 8);
+          if (started) ctx.lineTo(x, y);
+          else {
+            ctx.moveTo(x, y);
+            started = true;
+          }
+        }
+        ctx.stroke();
+      }
+    }
+
+    // ---- process CPU -----------------------------------------------------
+    if (cpuOn) {
+      const yMax = Math.max(Math.ceil(this.data.cpuMax / 50) * 50, 100);
+      ctx.fillStyle = "#8f918f";
+      ctx.fillText(`CPU ${yMax} %`, 6, cpuTop + 10);
+      let legendY = cpuTop + 22;
+      for (const [key, label, color] of CPU_SERIES) {
+        if (!this.data.cpu.has(key)) continue;
+        ctx.fillStyle = color;
+        ctx.fillText(`— ${label}`, 6, legendY);
+        legendY += 11;
+      }
+      for (const [key, , color] of CPU_SERIES) {
+        const series = this.data.cpu.get(key);
+        if (!series) continue;
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        let started = false;
+        for (let i = from; i < to; i++) {
+          const pct = series[i];
+          if (Number.isNaN(pct)) continue;
+          const x = LEFT_GUTTER + viewport.xOf(times[i], plotWidth);
+          if (x < LEFT_GUTTER || x > width) continue;
+          const y = cpuBottom - 2 - (Math.min(pct, yMax) / yMax) * (CPU_H - 6);
           if (started) ctx.lineTo(x, y);
           else {
             ctx.moveTo(x, y);

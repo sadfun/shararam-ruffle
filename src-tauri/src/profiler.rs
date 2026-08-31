@@ -119,6 +119,7 @@ mod imp {
                     std::env::consts::OS
                 )),
             );
+            cpu::spawn_sampler(profiler.clone());
             Ok(profiler)
         }
 
@@ -285,6 +286,192 @@ mod imp {
         samples: Vec<(f64, String, f64)>,
         #[serde(default)]
         meta: Vec<(String, String)>,
+    }
+
+    /// Per-process CPU gauges (macOS). A WKWebView splits the page across
+    /// helper processes — "com.apple.WebKit.WebContent" runs the page + wasm,
+    /// "com.apple.WebKit.GPU" runs its GPU work — so sampling their CPU next
+    /// to our own tells whether a main-thread stall was busy uninstrumented
+    /// work (WebContent hot) or waiting on the compositor/GPU (WebContent
+    /// cold, GPU hot). Written as `samples` rows every 500 ms:
+    /// `cpu_client_pct` / `cpu_webcontent_pct` / `cpu_gpu_pct`, percent of
+    /// one core (multithreaded processes can exceed 100).
+    #[cfg(target_os = "macos")]
+    mod cpu {
+        use super::Profiler;
+        use std::time::{Duration, Instant};
+
+        const SAMPLE_EVERY: Duration = Duration::from_millis(500);
+        /// Helper processes restart; re-discover pids every N samples.
+        const RESCAN_EVERY: u32 = 4;
+        const PROC_ALL_PIDS: u32 = 1;
+        const PATH_MAX: usize = 4096;
+
+        pub fn spawn_sampler(profiler: Profiler) {
+            let _ = std::thread::Builder::new()
+                .name("profiler-cpu".into())
+                .spawn(move || run(profiler));
+        }
+
+        struct Tracked {
+            pid: i32,
+            name: &'static str,
+            last_ns: u64,
+        }
+
+        fn run(profiler: Profiler) {
+            let own = std::process::id() as i32;
+            let ns_per_tick = ns_per_tick();
+            let mut tracked: Vec<Tracked> = Vec::new();
+            let mut tick = 0u32;
+            let mut last_wall = Instant::now();
+            loop {
+                std::thread::sleep(SAMPLE_EVERY);
+                if tick % RESCAN_EVERY == 0 {
+                    tracked = discover(own, &tracked);
+                }
+                tick = tick.wrapping_add(1);
+                let wall = Instant::now();
+                let elapsed = wall.duration_since(last_wall).as_secs_f64();
+                last_wall = wall;
+                if elapsed <= 0.0 {
+                    continue;
+                }
+                let mut by_name: std::collections::HashMap<&'static str, f64> =
+                    std::collections::HashMap::new();
+                for entry in &mut tracked {
+                    let Some(ns) = cpu_time_ns(entry.pid, ns_per_tick) else {
+                        continue;
+                    };
+                    if entry.last_ns > 0 && ns >= entry.last_ns {
+                        let pct = (ns - entry.last_ns) as f64 / 1e9 / elapsed * 100.0;
+                        *by_name.entry(entry.name).or_default() += pct;
+                    }
+                    entry.last_ns = ns;
+                }
+                for (name, pct) in by_name {
+                    profiler.sample(name, (pct * 10.0).round() / 10.0);
+                }
+            }
+        }
+
+        /// Our own process plus OUR WebKit helper processes. The helpers are
+        /// XPC services parented to launchd, so parent pid is useless; what
+        /// they do share with the app is its resource coalition (that is how
+        /// Activity Monitor groups them), so match by coalition id — this
+        /// also keeps Safari's own helpers out.
+        fn discover(own: i32, previous: &[Tracked]) -> Vec<Tracked> {
+            let carry = |pid: i32, name: &'static str| Tracked {
+                pid,
+                name,
+                last_ns: previous
+                    .iter()
+                    .find(|t| t.pid == pid && t.name == name)
+                    .map(|t| t.last_ns)
+                    .unwrap_or(0),
+            };
+            let mut out = vec![carry(own, "cpu_client_pct")];
+            let own_coalition = coalition_id(own);
+            for pid in all_pids() {
+                if pid <= 0 || pid == own {
+                    continue;
+                }
+                let Some(path) = pid_path(pid) else { continue };
+                let name = if path.contains("com.apple.WebKit.WebContent") {
+                    "cpu_webcontent_pct"
+                } else if path.contains("com.apple.WebKit.GPU") {
+                    "cpu_gpu_pct"
+                } else {
+                    continue;
+                };
+                if own_coalition.is_some() && coalition_id(pid) == own_coalition {
+                    out.push(carry(pid, name));
+                }
+            }
+            out
+        }
+
+        const PROC_PIDCOALITIONINFO: libc::c_int = 20;
+
+        /// proc_pidcoalitioninfo from libproc.h (2 coalition types + reserve).
+        #[repr(C)]
+        struct CoalitionInfo {
+            coalition_id: [u64; 2],
+            reserved: [u64; 3],
+        }
+
+        /// The resource coalition id of a process.
+        fn coalition_id(pid: i32) -> Option<u64> {
+            let mut info = CoalitionInfo {
+                coalition_id: [0; 2],
+                reserved: [0; 3],
+            };
+            let size = std::mem::size_of::<CoalitionInfo>() as libc::c_int;
+            let ret = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    PROC_PIDCOALITIONINFO,
+                    0,
+                    (&mut info as *mut CoalitionInfo).cast(),
+                    size,
+                )
+            };
+            (ret == size && info.coalition_id[0] != 0).then_some(info.coalition_id[0])
+        }
+
+        fn all_pids() -> Vec<i32> {
+            let mut pids = vec![0i32; 4096];
+            let bytes = unsafe {
+                libc::proc_listpids(
+                    PROC_ALL_PIDS,
+                    0,
+                    pids.as_mut_ptr().cast(),
+                    (pids.len() * std::mem::size_of::<i32>()) as libc::c_int,
+                )
+            };
+            if bytes <= 0 {
+                return Vec::new();
+            }
+            pids.truncate(bytes as usize / std::mem::size_of::<i32>());
+            pids
+        }
+
+        fn pid_path(pid: i32) -> Option<String> {
+            let mut buf = vec![0u8; PATH_MAX];
+            let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), PATH_MAX as u32) };
+            (len > 0).then(|| String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+        }
+
+        /// user+system CPU time of a process in nanoseconds.
+        fn cpu_time_ns(pid: i32, ns_per_tick: f64) -> Option<u64> {
+            let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                libc::proc_pid_rusage(
+                    pid,
+                    libc::RUSAGE_INFO_V2,
+                    (&mut info as *mut libc::rusage_info_v2).cast(),
+                )
+            };
+            (ret == 0)
+                .then(|| ((info.ri_user_time + info.ri_system_time) as f64 * ns_per_tick) as u64)
+        }
+
+        // mach_timebase_info is deprecated in libc in favor of the `mach2`
+        // crate; one struct is not worth a dependency.
+        #[allow(deprecated)]
+        fn ns_per_tick() -> f64 {
+            let mut timebase = libc::mach_timebase_info { numer: 0, denom: 0 };
+            unsafe { libc::mach_timebase_info(&mut timebase) };
+            if timebase.denom == 0 {
+                return 1.0;
+            }
+            timebase.numer as f64 / timebase.denom as f64
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    mod cpu {
+        pub fn spawn_sampler(_profiler: super::Profiler) {}
     }
 
     fn chrono_like_stamp() -> String {

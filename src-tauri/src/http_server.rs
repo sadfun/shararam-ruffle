@@ -82,6 +82,20 @@ async fn security_headers(State(state): State<AppState>, request: Request, next:
     response
         .headers_mut()
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    // Profiling builds are cross-origin isolated so the page can use
+    // SharedArrayBuffer: a worker samples the main thread's phase marker and
+    // tells stalls apart (frozen inside a rAF callback vs browser internals).
+    // Everything the game loads is same-origin (proxied), so COEP is safe.
+    if cfg!(feature = "profiler") {
+        response.headers_mut().insert(
+            "cross-origin-opener-policy",
+            HeaderValue::from_static("same-origin"),
+        );
+        response.headers_mut().insert(
+            "cross-origin-embedder-policy",
+            HeaderValue::from_static("require-corp"),
+        );
+    }
     response
 }
 

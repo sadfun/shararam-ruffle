@@ -31,6 +31,110 @@
   );
   marker("profiler_start", { url: location.pathname });
 
+  // ---- main-thread phase sampler -------------------------------------------
+  // The profiling server sends COOP/COEP, so the page is cross-origin
+  // isolated and can share memory with a worker. The main thread keeps a
+  // phase marker (idle / rAF callback / timer callback) in a
+  // SharedArrayBuffer — rAF and timers are patched so every callback marks
+  // itself — and a worker samples it every 2 ms. A worker keeps running
+  // while the main thread is frozen, so when the heartbeat detects a stall
+  // we can ask the worker what phase the thread froze in; the answer lands
+  // on the stall event as args (at_freeze + per-phase ms).
+  const PHASE_NAMES = ["idle", "raf", "timer"];
+  let phaseView = null;
+  let phaseWorker = null;
+  const phaseRequests = new Map();
+  let phaseRequestId = 0;
+  if (typeof SharedArrayBuffer !== "undefined" && self.crossOriginIsolated) {
+    const sab = new SharedArrayBuffer(4);
+    phaseView = new Int32Array(sab);
+    const wrapCallback = (fn, phase) => function (...args) {
+      const previous = Atomics.load(phaseView, 0);
+      Atomics.store(phaseView, 0, phase);
+      try {
+        return fn.apply(this, args);
+      } finally {
+        Atomics.store(phaseView, 0, previous);
+      }
+    };
+    const originalRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = callback => originalRaf(wrapCallback(callback, 1));
+    for (const name of ["setTimeout", "setInterval"]) {
+      const original = window[name].bind(window);
+      window[name] = (callback, delay, ...rest) =>
+        typeof callback === "function"
+          ? original(wrapCallback(callback, 2), delay, ...rest)
+          : original(callback, delay, ...rest);
+    }
+    const workerSource = `
+      let view = null, mainOriginMs = 0;
+      const ring = []; // flat [tMs, phase, ...] on the main page's clock
+      const RING_ENTRIES = 8000; // ~16 s at 2 ms
+      onmessage = e => {
+        const m = e.data;
+        if (m.sab) {
+          view = new Int32Array(m.sab);
+          mainOriginMs = m.timeOrigin;
+          setInterval(() => {
+            ring.push(performance.now() + performance.timeOrigin - mainOriginMs, Atomics.load(view, 0));
+            if (ring.length > RING_ENTRIES * 2) ring.splice(0, ring.length - RING_ENTRIES * 2);
+          }, 2);
+          return;
+        }
+        const counts = [0, 0, 0];
+        let total = 0;
+        let atFreeze = -1;
+        for (let i = 0; i < ring.length; i += 2) {
+          const t = ring[i];
+          if (t < m.from || t > m.to) continue;
+          counts[ring[i + 1]] += 1;
+          total += 1;
+          if (atFreeze < 0) atFreeze = ring[i + 1];
+        }
+        postMessage({ id: m.id, counts, total, atFreeze });
+      };
+    `;
+    try {
+      phaseWorker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" })));
+      phaseWorker.postMessage({ sab, timeOrigin: performance.timeOrigin });
+      phaseWorker.onmessage = e => {
+        const resolve = phaseRequests.get(e.data.id);
+        if (resolve) {
+          phaseRequests.delete(e.data.id);
+          resolve(e.data);
+        }
+      };
+      marker("phase_sampler_start", {});
+    } catch (error) {
+      phaseWorker = null;
+      marker("phase_sampler_error", { error: String(error) });
+    }
+  } else {
+    marker("phase_sampler_unavailable", { isolated: String(self.crossOriginIsolated) });
+  }
+  /** phases of the window [from, to] as stall args, or null */
+  const queryPhases = (from, to) =>
+    new Promise(resolve => {
+      if (!phaseWorker) return resolve(null);
+      const id = ++phaseRequestId;
+      phaseRequests.set(id, reply => {
+        if (!reply.total) return resolve(null);
+        const windowMs = to - from;
+        const phases = {};
+        let dominant = 0;
+        PHASE_NAMES.forEach((name, index) => {
+          const ms = (reply.counts[index] / reply.total) * windowMs;
+          if (ms >= 0.5) phases[name] = Math.round(ms);
+          if (reply.counts[index] > reply.counts[dominant]) dominant = index;
+        });
+        resolve({ at_freeze: PHASE_NAMES[dominant] || "idle", phases });
+      });
+      phaseWorker.postMessage({ id, from, to });
+      setTimeout(() => {
+        if (phaseRequests.delete(id)) resolve(null);
+      }, 300);
+    });
+
   // Frame cadence. requestAnimationFrame stops in background tabs; the
   // visibility markers explain such gaps in the graph.
   let previousFrame = null;
@@ -121,7 +225,13 @@
     const late = now - heartbeatLast - HEARTBEAT_MS;
     heartbeatLast = now;
     if (document.hidden) return; // background timers are throttled, not stalled
-    if (late > 20) event("browser", "stall", now - late, late);
+    if (late > 20) {
+      const start = now - late;
+      // attach the frozen phase from the worker sampler when available
+      queryPhases(start, now).then(info => {
+        event("browser", "stall", start, late, info || undefined);
+      });
+    }
   }, HEARTBEAT_MS);
   document.addEventListener("visibilitychange", () => {
     heartbeatLast = performance.now();

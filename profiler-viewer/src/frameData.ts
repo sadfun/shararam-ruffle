@@ -40,6 +40,12 @@ export interface ScreenGridData {
 }
 
 export interface FrameData {
+  /** per frame: browser/stall time clipped onto the frame */
+  stallMs: Float64Array;
+  /** per frame: the part of stallMs that overlaps ruffle host_tick spans
+   *  (main thread frozen inside our frame code — wasm/page work); the
+   *  remainder froze between ticks (browser internals / compositor) */
+  stallInTickMs: Float64Array;
   /** per frame, per category: attributed self-time ms */
   catMs: Float64Array[];
   /** per frame: sum of catMs — instrumented main-thread busy time */
@@ -52,6 +58,10 @@ export interface FrameData {
   /** per frame: gc-arena heap MB carried forward (NaN if not recorded) */
   gcHeapMb: Float64Array;
   gcHeapMaxMb: number;
+  /** per frame: process CPU % carried forward, by process key
+   *  (client / webcontent / gpu; empty map when the host didn't sample) */
+  cpu: Map<string, Float64Array>;
+  cpuMax: number;
   /** per-frame counter deltas from the ruffle render-event args
    *  (avm1_objects, shapes_registered, gc_bytes excluded, …) */
   counters: Map<string, Float64Array>;
@@ -77,6 +87,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
   const n = ends.length;
 
   const catMs = CATEGORIES.map(() => new Float64Array(n));
+  const stallMs = new Float64Array(n);
+  const stallInTickMs = new Float64Array(n);
   const activeMs = new Float64Array(n);
   const gpuWaitMs = new Float64Array(n);
   const memoryMb = new Float64Array(n).fill(NaN);
@@ -111,10 +123,22 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     cat: number;
   }
   const sweep: Sweep[] = [];
+  const labelBySeq = new Map<number, string>();
+  const tickStarts: number[] = [];
+  const tickEnds: number[] = [];
+  const stallIndexes: number[] = [];
   for (let i = 0; i < model.count; i++) {
     const kind = model.kinds[model.kindIds[i]];
     const start = model.startMs[i];
     const dur = model.durMs[i];
+
+    if (kind.source === "ruffle" && kind.cat === "frame" && kind.name === "host_tick") {
+      tickStarts.push(start);
+      tickEnds.push(start + Math.min(Math.max(dur, 0), SPAN_CAP_MS));
+    }
+    if (kind.source === "browser" && kind.cat === "browser" && kind.name === "stall") {
+      stallIndexes.push(i);
+    }
 
     if (kind.source === "browser" && kind.cat === "gpu") {
       const f = frameAt(start);
@@ -137,6 +161,37 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     eventCat[i] = cat;
     if (dur <= 0 || dur > SPAN_CAP_MS) continue;
     sweep.push({ idx: i, start, end: start + dur, cat });
+  }
+
+  // ---- stall classification ----------------------------------------------
+  // A stall overlapping ruffle host_tick spans means the main thread froze
+  // inside our frame code (uninstrumented wasm/page work); a stall outside
+  // any tick means the browser itself held the thread (compositor, its GC).
+  const tickStartsSorted = Float64Array.from(tickStarts);
+  for (const index of stallIndexes) {
+    const s = model.startMs[index];
+    const e = s + Math.min(Math.max(model.durMs[index], 0), SPAN_CAP_MS);
+    if (e <= s) continue;
+    addToFrames(stallMs, s, e);
+    let overlap = 0;
+    let t = lowerBound(tickStartsSorted, s - SPAN_CAP_MS);
+    for (; t < tickStarts.length && tickStarts[t] < e; t++) {
+      const from = Math.max(s, tickStarts[t]);
+      const to = Math.min(e, tickEnds[t]);
+      if (to > from) {
+        overlap += to - from;
+        addToFrames(stallInTickMs, from, to);
+      }
+    }
+    const fraction = overlap / (e - s);
+    labelBySeq.set(
+      model.seq[index],
+      fraction < 0.05
+        ? "Блокировка потока (между тиками — браузер/композитор)"
+        : fraction > 0.95
+          ? "Блокировка потока (внутри тика Ruffle)"
+          : "Блокировка потока (частично в тике)"
+    );
   }
 
   // ---- self-time sweep ---------------------------------------------------
@@ -192,6 +247,26 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
       memoryMb[f] = current;
       if (!Number.isNaN(current) && current > memoryMaxMb) memoryMaxMb = current;
     }
+  }
+
+  // ---- process CPU gauges (host-side sampler, macOS) ---------------------
+  const cpu = new Map<string, Float64Array>();
+  let cpuMax = 0;
+  for (const sample of model.samples) {
+    const match = sample.name.match(/^cpu_(\w+)_pct$/);
+    if (!match || !sample.timesMs.length) continue;
+    const series = new Float64Array(n).fill(NaN);
+    let pointer = 0;
+    let current = NaN;
+    for (let f = 0; f < n; f++) {
+      while (pointer < sample.timesMs.length && sample.timesMs[pointer] <= ends[f]) {
+        current = sample.values[pointer];
+        pointer++;
+      }
+      series[f] = current;
+      if (!Number.isNaN(current) && current > cpuMax) cpuMax = current;
+    }
+    cpu.set(match[1], series);
   }
 
   // ---- per-frame counters + gc heap from the ruffle render event ---------
@@ -322,7 +397,6 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
   }
 
   // ---- args-dependent extras: input kinds, traces, mouse/key tracks ------
-  const labelBySeq = new Map<number, string>();
   const traces: TraceLine[] = [];
   try {
     const { rows } = await query(
@@ -330,6 +404,7 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
        WHERE (cat = 'input' AND name = 'handle_event')
           OR (cat = 'external' AND name = 'call_out')
           OR (cat = 'script' AND name = 'array_sort')
+          OR (cat = 'browser' AND name = 'stall' AND args IS NOT NULL)
           OR cat = 'marker'
        ORDER BY ts_us`
     );
@@ -355,6 +430,17 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
           seq,
           `Array.sort (n=${args["n"] ?? "?"}${args["sort_on"] ? ", sortOn" : ""})`
         );
+      } else if (row["cat"] === "browser") {
+        // phase recorded by the worker sampler at freeze time (see
+        // web/profiler.js); more precise than the tick-overlap fallback
+        const PHASE_LABELS: Record<string, string> = {
+          raf: "замёрз в rAF-колбэке",
+          timer: "замёрз в таймер-колбэке",
+          capture: "замёрз в захвате записи",
+          idle: "замёрз вне JS — браузер/композитор"
+        };
+        const at = String(args["at_freeze"] ?? "");
+        if (at) labelBySeq.set(seq, `Блокировка потока (${PHASE_LABELS[at] ?? at})`);
       } else if (row["cat"] === "external") {
         const target = String(args["name"] ?? "");
         const callArgs = Array.isArray(args["args"]) ? (args["args"] as unknown[]) : [];
@@ -370,6 +456,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
   }
 
   return {
+    stallMs,
+    stallInTickMs,
     catMs,
     activeMs,
     gpuWaitMs,
@@ -377,6 +465,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     memoryMaxMb,
     gcHeapMb,
     gcHeapMaxMb,
+    cpu,
+    cpuMax,
     counters,
     samplerBySeq,
     screenGrid,

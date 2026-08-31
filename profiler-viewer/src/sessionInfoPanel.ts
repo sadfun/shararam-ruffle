@@ -90,7 +90,20 @@ export function renderSessionInfo(
       data.screenGrid !== null,
       data.screenGrid !== null ? "сетка 24×18 + бленды/маски" : "нужен бандл web-profiler от 30.08+"
     ],
-    ["CPU Usage", false, "не записывается этой сборкой"]
+    [
+      "CPU процессов",
+      data.cpu.size > 0,
+      data.cpu.size > 0
+        ? [...data.cpu.keys()].join(" / ")
+        : "пишется хостом на macOS (сборка от 31.08+)"
+    ],
+    [
+      "Сэмплер фаз потока",
+      has((c, n) => c === "marker" && n === "phase_sampler_start"),
+      has((c, n) => c === "marker" && n === "phase_sampler_start")
+        ? "блокировки знают фазу заморозки (SAB + воркер)"
+        : "нужны COOP/COEP сервера от 31.08+"
+    ]
   ];
   const list = el("div", "collector-list");
   for (const [name, present, note] of rows) {

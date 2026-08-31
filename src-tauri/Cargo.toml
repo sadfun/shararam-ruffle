@@ -55,3 +55,6 @@ tauri-build = "2"
 [dev-dependencies]
 tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
