@@ -103,6 +103,13 @@ export function renderSessionInfo(
       has((c, n) => c === "marker" && n === "phase_sampler_start")
         ? "блокировки знают фазу заморозки (SAB + воркер)"
         : "нужны COOP/COEP сервера от 31.08+"
+    ],
+    [
+      "Стеки WebContent",
+      has((c, n) => c === "native" && n === "wc_stacks"),
+      has((c, n) => c === "native" && n === "wc_stacks")
+        ? "нативные стеки главного потока (/usr/bin/sample)"
+        : "диагностический флаг --sample-webcontent"
     ]
   ];
   const list = el("div", "collector-list");

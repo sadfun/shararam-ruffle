@@ -15,6 +15,10 @@
 //! method is a no-op and `Profiler` carries no data.
 
 pub use imp::Profiler;
+#[cfg(feature = "profiler")]
+pub use imp::spawn_webcontent_sampler;
+#[cfg(not(feature = "profiler"))]
+pub fn spawn_webcontent_sampler(_profiler: Profiler) {}
 
 /// One event to store. `args` is a JSON object as text.
 #[derive(Debug)]
@@ -419,6 +423,17 @@ mod imp {
             (ret == size && info.coalition_id[0] != 0).then_some(info.coalition_id[0])
         }
 
+        pub(super) fn find_webcontent(own: i32) -> Option<i32> {
+            let own_coalition = coalition_id(own)?;
+            all_pids().into_iter().find(|&pid| {
+                pid > 0
+                    && pid != own
+                    && pid_path(pid)
+                        .is_some_and(|path| path.contains("com.apple.WebKit.WebContent"))
+                    && coalition_id(pid) == Some(own_coalition)
+            })
+        }
+
         fn all_pids() -> Vec<i32> {
             let mut pids = vec![0i32; 4096];
             let bytes = unsafe {
@@ -473,6 +488,204 @@ mod imp {
     mod cpu {
         pub fn spawn_sampler(_profiler: super::Profiler) {}
     }
+
+    /// Native main-thread stacks of the WebContent process, recorded with
+    /// `/usr/bin/sample` in ~5 s chunks (opt-in: `--sample-webcontent`).
+    /// This answers what WebKit itself is doing while the page's main thread
+    /// is frozen outside JS (layer commits, GPU-process IPC, JSC GC, …) —
+    /// nothing inside the page can see that. Sampling suspends the target's
+    /// threads on every tick, so it stays a diagnostic flag, never a default.
+    #[cfg(target_os = "macos")]
+    mod native_stacks {
+        use super::Profiler;
+        use std::fmt::Write as _;
+        use std::time::Duration;
+
+        const CHUNK_SECONDS: u32 = 5;
+        const TOP_STACKS: usize = 10;
+        const TAIL_FRAMES: usize = 8;
+
+        pub fn spawn(profiler: Profiler) {
+            let _ = std::thread::Builder::new()
+                .name("profiler-wc-sample".into())
+                .spawn(move || run(profiler));
+        }
+
+        fn run(profiler: Profiler) {
+            let own = std::process::id() as i32;
+            let out_path = std::env::temp_dir().join(format!("shararam-wc-sample-{own}.txt"));
+            loop {
+                let Some(pid) = super::cpu::find_webcontent(own) else {
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                };
+                let started_us = super::super::now_us();
+                let output = std::process::Command::new("/usr/bin/sample")
+                    .arg(pid.to_string())
+                    .arg(CHUNK_SECONDS.to_string())
+                    .arg("1") // 1 ms interval: sample count ≈ milliseconds
+                    .arg("-file")
+                    .arg(&out_path)
+                    .output();
+                let dur_us = super::super::now_us() - started_us;
+                let ok = output.as_ref().is_ok_and(|out| out.status.success());
+                if !ok {
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&out_path) else {
+                    continue;
+                };
+                let _ = std::fs::remove_file(&out_path);
+                if let Some((total, stacks)) = parse_main_thread(&text) {
+                    let mut args = String::with_capacity(2048);
+                    let _ = write!(args, "{{\"pid\":{pid},\"total\":{total},\"stacks\":[");
+                    for (index, (count, chain)) in stacks.iter().enumerate() {
+                        if index > 0 {
+                            args.push(',');
+                        }
+                        let chain = serde_json::to_string(chain).unwrap_or_default();
+                        let _ = write!(args, "[{count},{chain}]");
+                    }
+                    args.push_str("]}");
+                    profiler.event("native", "wc_stacks", started_us, dur_us, Some(args));
+                }
+            }
+        }
+
+        /// Extracts the hottest leaf chains (leaf-first, up to
+        /// [`TAIL_FRAMES`] frames) of the main thread from `sample` output.
+        fn parse_main_thread(text: &str) -> Option<(u64, Vec<(u64, String)>)> {
+            let mut in_graph = false;
+            let mut in_main_thread = false;
+            let mut total = 0u64;
+            // stack of (depth, count, frame name) for the current path
+            let mut path: Vec<(usize, u64, String)> = Vec::new();
+            let mut leaves: Vec<(u64, String)> = Vec::new();
+            let flush_leaf = |path: &[(usize, u64, String)], leaves: &mut Vec<(u64, String)>| {
+                let Some(&(_, count, _)) = path.last() else {
+                    return;
+                };
+                let chain: Vec<&str> = path
+                    .iter()
+                    .rev()
+                    .take(TAIL_FRAMES)
+                    .map(|(_, _, name)| name.as_str())
+                    .collect();
+                leaves.push((count, chain.join(" ← ")));
+            };
+            for line in text.lines() {
+                if !in_graph {
+                    in_graph = line.starts_with("Call graph:");
+                    continue;
+                }
+                if line.starts_with("Total number in stack") {
+                    break;
+                }
+                let Some(digit_at) = line.find(|c: char| c.is_ascii_digit()) else {
+                    continue;
+                };
+                if digit_at < 4 {
+                    continue;
+                }
+                let rest = &line[digit_at..];
+                let count: u64 = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                if digit_at == 4 {
+                    // a thread header line
+                    flush_leaf(&path, &mut leaves);
+                    path.clear();
+                    in_main_thread = line.contains("com.apple.main-thread");
+                    if in_main_thread {
+                        total = count;
+                    }
+                    continue;
+                }
+                if !in_main_thread {
+                    continue;
+                }
+                let depth = (digit_at - 4) / 2;
+                let name = frame_name(rest);
+                // the previous node was a leaf iff the tree does not descend
+                if path.last().is_some_and(|&(d, _, _)| d >= depth) {
+                    flush_leaf(&path, &mut leaves);
+                }
+                while path.last().is_some_and(|&(d, _, _)| d >= depth) {
+                    path.pop();
+                }
+                path.push((depth, count, name));
+            }
+            flush_leaf(&path, &mut leaves);
+            if total == 0 {
+                return None;
+            }
+            leaves.sort_by(|a, b| b.0.cmp(&a.0));
+            leaves.truncate(TOP_STACKS);
+            Some((total, leaves))
+        }
+
+        /// `"1505 mach_msg  (in libsystem_kernel.dylib) + 24  [0x…]"` →
+        /// `"mach_msg [libsystem_kernel]"`.
+        fn frame_name(rest: &str) -> String {
+            let after_count = rest
+                .split_once(' ')
+                .map(|(_, tail)| tail.trim_start())
+                .unwrap_or(rest);
+            let (symbol, tail) = after_count
+                .split_once("  (in ")
+                .unwrap_or((after_count, ""));
+            let library = tail
+                .split_once(')')
+                .map(|(lib, _)| lib.trim_end_matches(".dylib"))
+                .unwrap_or("");
+            if library.is_empty() {
+                symbol.trim().to_string()
+            } else {
+                format!("{} [{}]", symbol.trim(), library)
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::parse_main_thread;
+
+            #[test]
+            fn parses_main_thread_leaf_chains() {
+                let text = "\
+Call graph:
+    100 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 100 start  (in dyld) + 6992  [0x1]
+    +   100 xpc_main  (in libxpc.dylib) + 64  [0x2]
+    +     90 __CFRunLoopRun  (in CoreFoundation) + 1188  [0x3]
+    +     ! 90 mach_msg  (in libsystem_kernel.dylib) + 24  [0x4]
+    +     10 CA::Transaction::commit()  (in QuartzCore) + 1  [0x5]
+    100 Thread_2
+    + 100 something_else  (in lib) + 1  [0x6]
+
+Total number in stack (recursive counted multiple, when >=5):
+";
+                let (total, stacks) = parse_main_thread(text).unwrap();
+                assert_eq!(total, 100);
+                assert_eq!(stacks[0].0, 90);
+                assert!(stacks[0].1.starts_with("mach_msg [libsystem_kernel] ← __CFRunLoopRun"));
+                assert_eq!(stacks[1].0, 10);
+                assert!(stacks[1].1.starts_with("CA::Transaction::commit() [QuartzCore]"));
+                assert!(!stacks.iter().any(|(_, chain)| chain.contains("something_else")));
+            }
+        }
+    }
+
+    /// Starts the WebContent native-stack sampler (`--sample-webcontent`).
+    #[cfg(target_os = "macos")]
+    pub fn spawn_webcontent_sampler(profiler: Profiler) {
+        native_stacks::spawn(profiler);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn spawn_webcontent_sampler(_profiler: Profiler) {}
 
     fn chrono_like_stamp() -> String {
         // `YYYYMMDD-HHMMSS` in UTC without pulling in chrono.

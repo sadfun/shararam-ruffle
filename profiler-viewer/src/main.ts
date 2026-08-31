@@ -12,6 +12,7 @@ import { ActivitySequence } from "./activitySequence";
 import { ActionScriptPanel } from "./actionScript";
 import { AllocationsPanel } from "./allocationsPanel";
 import { ScreenPanel } from "./screenPanel";
+import { WebContentPanel } from "./webContentPanel";
 import { TraceLogPanel } from "./traceLog";
 import { renderSessionInfo } from "./sessionInfoPanel";
 import { RenderPanel } from "./renderPanel";
@@ -37,6 +38,7 @@ let sequence: ActivitySequence | null = null;
 let actionScript: ActionScriptPanel | null = null;
 let allocations: AllocationsPanel | null = null;
 let screenPanel: ScreenPanel | null = null;
+let webContent: WebContentPanel | null = null;
 let traceLog: TraceLogPanel | null = null;
 let renderPanel: RenderPanel | null = null;
 let preview: SnapshotPreview | null = null;
@@ -75,6 +77,7 @@ function queuePanels() {
     actionScript?.render();
     allocations?.render();
     screenPanel?.render();
+    void webContent?.render();
     traceLog?.render();
     void renderPanel?.render();
   });
@@ -147,7 +150,8 @@ function renderSidebarCollectors() {
     ["Счётчики аллокаций", data!.counters.has("avm1_objects")],
     ["Карта команд экрана", data!.screenGrid !== null],
     ["CPU процессов", data!.cpu.size > 0],
-    ["Сэмплер фаз потока", has((c, n) => c === "marker" && n === "phase_sampler_start")]
+    ["Сэмплер фаз потока", has((c, n) => c === "marker" && n === "phase_sampler_start")],
+    ["Стеки WebContent", has((c, n) => c === "native" && n === "wc_stacks")]
   ];
   for (const [name, present] of rows) {
     const row = document.createElement("div");
@@ -229,6 +233,7 @@ async function openFile(file: File) {
       showTooltip,
       hideTooltip
     );
+    webContent = new WebContentPanel(document.getElementById("page-webcontent")!, model, state);
     traceLog = new TraceLogPanel(document.getElementById("page-trace")!, model, data, state);
     renderPanel = new RenderPanel(document.getElementById("page-render")!, model, state);
     renderSessionInfo(document.getElementById("page-session")!, model, data, file.name);

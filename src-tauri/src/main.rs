@@ -60,6 +60,13 @@ async fn main() -> Result<()> {
         if let Some(path) = profiler.path() {
             println!("Profiling to {}", path.display());
         }
+        // `--sample-webcontent`: record native main-thread stacks of the
+        // WKWebView WebContent process with /usr/bin/sample (diagnostic —
+        // sampling suspends the target's threads on every tick).
+        if args.iter().any(|arg| arg == "--sample-webcontent") {
+            shararam_ruffle::profiler::spawn_webcontent_sampler(profiler.clone());
+            println!("Sampling WebContent native stacks (--sample-webcontent)");
+        }
         profiler
     } else {
         shararam_ruffle::profiler::Profiler::default()

@@ -186,6 +186,8 @@ export class FrameTimeline {
       if (ms >= 0.5) parts.push(`${category.label} ${formatMs(ms)}`);
     });
     if (this.data.gpuWaitMs[index] >= 1) parts.push(`ожидание GPU ${formatMs(this.data.gpuWaitMs[index])}`);
+    if (this.data.frameTailMs[index] >= 1)
+      parts.push(`послекадровый хвост браузера ${formatMs(this.data.frameTailMs[index])}`);
     if (this.data.stallMs[index] >= 1) {
       const outMs = this.data.stallMs[index] - this.data.stallInTickMs[index];
       parts.push(

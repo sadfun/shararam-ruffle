@@ -62,6 +62,10 @@ export interface FrameData {
    *  (client / webcontent / gpu; empty map when the host didn't sample) */
   cpu: Map<string, Float64Array>;
   cpuMax: number;
+  /** per frame: browser's after-frame work — the gap between the last rAF
+   *  callback returning and the next macrotask (layer commit, WebGL flush
+   *  backpressure); NaN when not recorded */
+  frameTailMs: Float64Array;
   /** per-frame counter deltas from the ruffle render-event args
    *  (avm1_objects, shapes_registered, gc_bytes excluded, …) */
   counters: Map<string, Float64Array>;
@@ -269,6 +273,16 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     cpu.set(match[1], series);
   }
 
+  // ---- browser after-frame tail (page-side gauge) ------------------------
+  const frameTailMs = new Float64Array(n).fill(NaN);
+  const tail = model.samples.find(sample => sample.name === "post_raf_tail_ms");
+  if (tail) {
+    for (let i = 0; i < tail.timesMs.length; i++) {
+      const f = frameAt(tail.timesMs[i]);
+      if (f >= 0 && !(frameTailMs[f] >= tail.values[i])) frameTailMs[f] = tail.values[i];
+    }
+  }
+
   // ---- per-frame counters + gc heap from the ruffle render event ---------
   const gcHeapMb = new Float64Array(n).fill(NaN);
   let gcHeapMaxMb = 0;
@@ -467,6 +481,7 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     gcHeapMaxMb,
     cpu,
     cpuMax,
+    frameTailMs,
     counters,
     samplerBySeq,
     screenGrid,

@@ -235,6 +235,9 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .screen-wrap { padding: 2px 0; }
 #screen-canvas { display: block; border-radius: 3px; cursor: crosshair; }
 
+/* ---------- webcontent stacks ---------- */
+.wc-chain { font: 10px ui-monospace, Menlo, monospace; word-break: break-all; color: #b8bab8; }
+
 /* ---------- summary panel ---------- */
 .sum-header {
   display: flex;

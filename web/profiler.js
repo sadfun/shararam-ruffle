@@ -43,11 +43,13 @@
   const PHASE_NAMES = ["idle", "raf", "timer"];
   let phaseView = null;
   let phaseWorker = null;
+  let postFrameTail = null;
   const phaseRequests = new Map();
   let phaseRequestId = 0;
   if (typeof SharedArrayBuffer !== "undefined" && self.crossOriginIsolated) {
     const sab = new SharedArrayBuffer(4);
     phaseView = new Int32Array(sab);
+    let rafExitAt = 0;
     const wrapCallback = (fn, phase) => function (...args) {
       const previous = Atomics.load(phaseView, 0);
       Atomics.store(phaseView, 0, phase);
@@ -55,6 +57,26 @@
         return fn.apply(this, args);
       } finally {
         Atomics.store(phaseView, 0, previous);
+        if (phase === 1) rafExitAt = performance.now();
+      }
+    };
+    // Post-frame tail: a message posted from inside a rAF callback is
+    // delivered only after the browser finishes the rendering turn (style,
+    // layer commit, WebGL flush backpressure). The gap between the LAST rAF
+    // callback returning and that message running is exactly the browser's
+    // own after-frame work — the per-frame face of "frozen outside JS".
+    const tailChannel = new MessageChannel();
+    let tailPosted = false;
+    tailChannel.port1.onmessage = () => {
+      tailPosted = false;
+      if (rafExitAt) {
+        pending.samples.push([performance.now(), "post_raf_tail_ms", performance.now() - rafExitAt]);
+      }
+    };
+    postFrameTail = () => {
+      if (!tailPosted) {
+        tailPosted = true;
+        tailChannel.port2.postMessage(0);
       }
     };
     const originalRaf = window.requestAnimationFrame.bind(window);
@@ -141,6 +163,7 @@
   const onFrame = timestamp => {
     if (previousFrame !== null) pending.frames.push([timestamp, timestamp - previousFrame]);
     previousFrame = timestamp;
+    if (postFrameTail) postFrameTail();
     requestAnimationFrame(onFrame);
   };
   requestAnimationFrame(onFrame);
