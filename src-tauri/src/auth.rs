@@ -39,7 +39,8 @@ struct OfficialLoginResponse {
 
 impl OfficialSession {
     pub async fn login(official_origin: &str, login: &str, password: &str) -> Result<Self> {
-        if login.trim().is_empty() || password.is_empty() {
+        let username = login.trim();
+        if username.is_empty() || password.is_empty() {
             bail!("Введите логин и пароль");
         }
         // ServerAction issues an RTMP ticket bound to the browser-like HTTP
@@ -61,8 +62,7 @@ impl OfficialSession {
             .context("официальная страница входа вернула ошибку")?;
 
         let password_hash = format!("{:x}", md5::compute(password.as_bytes()));
-        let body =
-            serde_json::json!({ "login": login.trim(), "password": password_hash }).to_string();
+        let body = serde_json::json!({ "login": username, "password": password_hash }).to_string();
         let response = client
             .post(format!("{official_origin}/api/user/loqin"))
             .header("Origin", official_origin)
@@ -91,6 +91,7 @@ impl OfficialSession {
                     .unwrap_or_else(|| "Неверный логин или пароль".into())
             );
         }
+        tracing::info!(username, "Logged in as {username}");
         Ok(Self {
             client,
             servers: Default::default(),

@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
+use axum::http::uri::Authority;
 use rand::RngCore;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -13,8 +14,9 @@ pub struct AppState {
     /// External host when the companion runs as a public server behind a
     /// TLS-terminating reverse proxy (e.g. `shararam.sadfun.dev`). `None` means
     /// the default single-user loopback mode.
-    public_host: Option<Arc<str>>,
+    public_host: Option<Authority>,
     pub sessions: Arc<RwLock<HashMap<String, OfficialSession>>>,
+    pub(crate) session_usernames: Arc<RwLock<HashMap<String, Arc<str>>>>,
     pub official_base: Arc<RwLock<Option<CachedBase>>>,
     pub diagnostics: Arc<RwLock<Diagnostics>>,
 }
@@ -49,6 +51,7 @@ impl AppState {
             official_origin: Arc::from(OFFICIAL_ORIGIN),
             public_host: None,
             sessions: Default::default(),
+            session_usernames: Default::default(),
             official_base: Default::default(),
             diagnostics: Default::default(),
         })
@@ -57,8 +60,24 @@ impl AppState {
     /// Build a state for public hosted mode behind a reverse proxy that
     /// terminates TLS for `host` and forwards to this loopback server.
     pub fn with_public_host(host: impl Into<String>) -> Result<Self> {
+        let host = host.into();
+        ensure!(
+            !host.contains('@'),
+            "public host must not contain user information"
+        );
+        let public_host = host.parse::<Authority>().with_context(|| {
+            format!("invalid public host {host:?}; expected a host name with an optional port")
+        })?;
+        ensure!(
+            public_host
+                .as_str()
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')),
+            "public host contains characters that are unsafe in a CSP source"
+        );
         Ok(Self {
-            public_host: Some(Arc::from(host.into().as_str())),
+            public_host: Some(public_host),
             ..Self::new()?
         })
     }
@@ -81,10 +100,37 @@ impl AppState {
     }
 
     pub fn public_host(&self) -> Option<&str> {
-        self.public_host.as_deref()
+        self.public_host.as_ref().map(Authority::as_str)
     }
 
     pub fn is_public(&self) -> bool {
         self.public_host.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_host_requires_an_http_authority() {
+        let state = AppState::with_public_host("Example.COM:8443").unwrap();
+        assert_eq!(state.public_host(), Some("Example.COM:8443"));
+
+        for invalid in [
+            "",
+            "https://example.com",
+            "example.com/path",
+            "user@example.com",
+            "example.com;script-src",
+            "example.com,script-src",
+            "example.com'",
+            "example.com\r\nx-injected: true",
+        ] {
+            assert!(
+                AppState::with_public_host(invalid).is_err(),
+                "accepted invalid public host {invalid:?}"
+            );
+        }
     }
 }

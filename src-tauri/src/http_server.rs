@@ -34,6 +34,9 @@ struct WebAssets;
 /// page carries it without exposing it in the URL. See [`static_response`].
 const CAPABILITY_PLACEHOLDER: &str = "__SHARARAM_CAP__";
 const LAYER_INLINE_PLACEHOLDER: &str = "__SHARARAM_LAYER_INLINE__";
+const NO_STORE: &str = "no-store";
+const REVALIDATE_CACHE: &str = "public, no-cache";
+const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// `SHARARAM_LAYER_INLINE=0` turns off inline rendering of Layer blend
 /// groups in the bundled Ruffle (a safety valve; on by default).
@@ -74,7 +77,8 @@ async fn security_headers(State(state): State<AppState>, request: Request, next:
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         "content-security-policy",
-        HeaderValue::from_str(&content_security_policy(&state)).expect("static CSP is header-safe"),
+        HeaderValue::from_str(&content_security_policy(&state))
+            .expect("validated public host must produce a header-safe CSP"),
     );
     response.headers_mut().insert(
         "x-content-type-options",
@@ -101,19 +105,39 @@ fn content_security_policy(state: &AppState) -> String {
     )
 }
 
-async fn static_index(State(state): State<AppState>) -> Response {
-    static_response("index.html", Some(state.capability()))
+async fn static_index(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    static_response("index.html", Some(state.capability()), &headers)
 }
-async fn static_asset(State(state): State<AppState>, Path(path): Path<String>) -> Response {
+async fn static_asset(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     // The capability token reaches remote browsers only through the served
     // page; every other asset is returned verbatim.
     let inject = (path == "index.html").then(|| state.capability());
-    static_response(&path, inject)
+    static_response(&path, inject, &headers)
 }
 
-fn static_response(path: &str, inject_capability: Option<&str>) -> Response {
+fn static_response(
+    path: &str,
+    inject_capability: Option<&str>,
+    request_headers: &HeaderMap,
+) -> Response {
     match WebAssets::get(path) {
         Some(asset) => {
+            let cache_control = static_cache_control(path, inject_capability.is_some());
+            let etag = inject_capability
+                .is_none()
+                .then(|| format!("\"{}\"", hex::encode(asset.metadata.sha256_hash())));
+            if etag
+                .as_deref()
+                .is_some_and(|etag| if_none_match(request_headers, etag))
+            {
+                let mut response = StatusCode::NOT_MODIFIED.into_response();
+                set_static_cache_headers(&mut response, cache_control, etag.as_deref());
+                return response;
+            }
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             let body = match inject_capability {
                 Some(capability) => Body::from(
@@ -129,16 +153,64 @@ fn static_response(path: &str, inject_capability: Option<&str>) -> Response {
                 header::CONTENT_TYPE,
                 HeaderValue::from_str(mime.as_ref()).unwrap(),
             );
-            // The executable embeds these files. A restarted development build
-            // can therefore serve different bytes from the same loopback URL.
-            // Never reuse assets from a previous executable build.
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            set_static_cache_headers(&mut response, cache_control, etag.as_deref());
             response
         }
         None => (StatusCode::NOT_FOUND, "Not found").into_response(),
     }
+}
+
+/// Ruffle's build pipeline puts a content hash in immutable bundle names. All
+/// other public assets retain stable URLs, so caches must revalidate their ETag.
+fn static_cache_control(path: &str, personalized: bool) -> &'static str {
+    if personalized {
+        return NO_STORE;
+    }
+    let fingerprinted = path.strip_prefix("ruffle/").is_some_and(|path| {
+        path.rsplit('/').next().is_some_and(|file_name| {
+            file_name
+                .split('.')
+                .any(|part| part.len() >= 16 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        })
+    });
+    if fingerprinted {
+        IMMUTABLE_CACHE
+    } else {
+        REVALIDATE_CACHE
+    }
+}
+
+fn set_static_cache_headers(
+    response: &mut Response,
+    cache_control: &'static str,
+    etag: Option<&str>,
+) {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    if let Some(etag) = etag {
+        response.headers_mut().insert(
+            header::ETAG,
+            HeaderValue::from_str(etag).expect("a SHA-256 digest must be a valid ETag"),
+        );
+    }
+}
+
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|candidate| {
+            candidate == "*"
+                || candidate == etag
+                || candidate
+                    .strip_prefix("W/")
+                    .is_some_and(|weak| weak == etag)
+        })
 }
 
 async fn login(
@@ -152,6 +224,11 @@ async fn login(
     match OfficialSession::login(state.official_origin(), &request.login, &request.password).await {
         Ok(session) => {
             let id = Uuid::new_v4().to_string();
+            state
+                .session_usernames
+                .write()
+                .await
+                .insert(id.clone(), Arc::from(request.login.trim()));
             state.sessions.write().await.insert(id.clone(), session);
             // Behind the public reverse proxy the browser talks HTTPS, so the
             // session cookie must be `Secure`; on loopback it must not be, or
@@ -180,6 +257,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     }
     if let Some(id) = session_id(&headers) {
         state.sessions.write().await.remove(id);
+        state.session_usernames.write().await.remove(id);
     }
     let mut response = axum::Json(json!({"ok": true})).into_response();
     expire_session_cookie(&state, &mut response);
@@ -285,6 +363,7 @@ async fn bootstrap_from_origin(
         Ok(Some(page)) => page,
         Ok(None) => {
             state.sessions.write().await.remove(&session_id);
+            state.session_usernames.write().await.remove(&session_id);
             return expired_session(&state);
         }
         Err(error) => return internal(error),
@@ -506,7 +585,7 @@ async fn official_base(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 fn swf_response(cached: CachedBase) -> Response {
-    let mut response = Body::from(cached.bytes.as_ref().clone()).into_response();
+    let mut response = Body::from(Bytes::from_owner(SharedBytes(cached.bytes))).into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -518,6 +597,14 @@ fn swf_response(cached: CachedBase) -> Response {
         HeaderValue::from_str(&cached.sha256).unwrap(),
     );
     response
+}
+
+struct SharedBytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
 async fn socket_proxy(
@@ -533,6 +620,10 @@ async fn socket_proxy(
     let Some(session) = session(&state, &headers).await else {
         tracing::info!("bridge WebSocket rejected: no local session");
         return (StatusCode::UNAUTHORIZED, "Login required").into_response();
+    };
+    let username = match session_id(&headers) {
+        Some(id) => state.session_usernames.read().await.get(id).cloned(),
+        None => None,
     };
     let endpoint = {
         let servers = session.servers.read().await;
@@ -560,11 +651,16 @@ async fn socket_proxy(
         )
             .into_response();
     }
-    tracing::info!(host = %query.host, port = query.port, "opaque socket tunnel accepted");
+    tracing::debug!(host = %query.host, port = query.port, "socket tunnel accepted");
     let diagnostics = state.diagnostics.clone();
     let tunnel_active = session.tunnel_active.clone();
     ws.on_upgrade(move |socket| async move {
-        tunnel::run(socket, endpoint, diagnostics).await;
+        match username {
+            Some(username) => {
+                tunnel::run_for_user(socket, endpoint, username, diagnostics).await;
+            }
+            None => tunnel::run(socket, endpoint, diagnostics).await,
+        }
         tunnel_active.store(false, Ordering::Release);
     })
 }
@@ -756,9 +852,11 @@ fn valid_origin(state: &AppState, headers: &HeaderMap) -> bool {
         return false;
     };
     // Public mode: the reverse proxy terminates TLS for the configured host and
-    // forwards both Host and Origin unchanged, so require an exact HTTPS match.
+    // forwards both Host and Origin unchanged, so require a matching HTTPS
+    // origin. URI authorities are case-insensitive.
     if let Some(public_host) = state.public_host() {
-        return host == public_host && origin == format!("https://{public_host}");
+        return host.eq_ignore_ascii_case(public_host)
+            && origin.eq_ignore_ascii_case(&format!("https://{public_host}"));
     }
     (host.starts_with("127.0.0.1:") || host.starts_with("localhost:"))
         && origin == format!("http://{host}")
@@ -768,7 +866,7 @@ fn forbidden() -> Response {
     (StatusCode::FORBIDDEN, "Forbidden").into_response()
 }
 fn internal(error: impl std::fmt::Display) -> Response {
-    tracing::warn!("HTTP bridge failure: {error}");
+    tracing::warn!(error = %error, "HTTP bridge failure");
     (
         StatusCode::BAD_GATEWAY,
         axum::Json(json!({"error": error.to_string()})),
@@ -805,7 +903,92 @@ mod tests {
         assert!(csp.contains("connect-src 'self' ws://127.0.0.1:* ws://localhost:*"));
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
+            NO_STORE
+        );
+        assert!(response.headers().get(header::ETAG).is_none());
+    }
+
+    #[tokio::test]
+    async fn only_fingerprinted_ruffle_bundles_are_cached_immutably() {
+        assert_eq!(
+            static_cache_control("ruffle/f74720ae9023bbe37370.wasm", false),
+            IMMUTABLE_CACHE
+        );
+        assert_eq!(
+            static_cache_control("ruffle/core.ruffle.5d58f4f9b34938399345.js", false),
+            IMMUTABLE_CACHE
+        );
+        assert_eq!(
+            static_cache_control("ruffle/core.ruffle.5d58f4f9b34938399345.js.map", false),
+            IMMUTABLE_CACHE
+        );
+        assert_eq!(static_cache_control("index.html", true), NO_STORE);
+
+        for mutable in [
+            "app.js",
+            "styles.css",
+            "ruffle/ruffle.js",
+            "ruffle/BUILD-INFO.md",
+            "ruffle/123456789abcdef.js",
+            "ruffle/not-a-content-hash.wasm",
+        ] {
+            assert_eq!(
+                static_cache_control(mutable, false),
+                REVALIDATE_CACHE,
+                "unexpected cache policy for {mutable}"
+            );
+        }
+
+        let response = router(AppState::new().unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ruffle/f74720ae9023bbe37370.wasm")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            IMMUTABLE_CACHE
+        );
+        assert!(response.headers().get(header::ETAG).is_some());
+    }
+
+    #[tokio::test]
+    async fn unversioned_static_assets_use_etag_revalidation() {
+        let state = AppState::new().unwrap();
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            REVALIDATE_CACHE
+        );
+        let etag = response.headers().get(header::ETAG).unwrap().clone();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/app.js")
+                    .header(header::IF_NONE_MATCH, etag.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers().get(header::ETAG), Some(&etag));
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            REVALIDATE_CACHE
         );
     }
 
@@ -844,7 +1027,7 @@ mod tests {
 
     #[test]
     fn public_origin_check_requires_the_external_https_origin() {
-        let state = AppState::with_public_host("shararam.sadfun.dev").unwrap();
+        let state = AppState::with_public_host("Shararam.Sadfun.Dev").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             header::HOST,
@@ -876,6 +1059,21 @@ mod tests {
             HeaderValue::from_static("https://evil.test"),
         );
         assert!(!valid_origin(&state, &spoofed));
+    }
+
+    #[test]
+    fn cached_base_response_reuses_shared_bytes() {
+        let bytes = Arc::new(vec![1, 2, 3]);
+        let cached = CachedBase {
+            bytes: bytes.clone(),
+            sha256: "00".to_owned(),
+        };
+
+        let response = swf_response(cached);
+
+        assert_eq!(Arc::strong_count(&bytes), 2);
+        drop(response);
+        assert_eq!(Arc::strong_count(&bytes), 1);
     }
 
     #[tokio::test]
@@ -926,6 +1124,11 @@ mod tests {
                 tunnel_active: Default::default(),
             },
         );
+        state
+            .session_usernames
+            .write()
+            .await
+            .insert("expired-session".to_owned(), Arc::from("test-user"));
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-shararam-live-capability",
@@ -940,6 +1143,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(state.sessions.read().await.is_empty());
+        assert!(state.session_usernames.read().await.is_empty());
         let cookie = response
             .headers()
             .get(header::SET_COOKIE)
@@ -1118,6 +1322,11 @@ mod tests {
                 tunnel_active: Default::default(),
             },
         );
+        state
+            .session_usernames
+            .write()
+            .await
+            .insert("live-session".to_owned(), Arc::from("test-user"));
 
         let response = router(state.clone())
             .oneshot(
@@ -1143,6 +1352,10 @@ mod tests {
         assert!(
             state.sessions.read().await.is_empty(),
             "the official session must not survive a logout"
+        );
+        assert!(
+            state.session_usernames.read().await.is_empty(),
+            "the session username must not survive a logout"
         );
     }
 
@@ -1243,6 +1456,11 @@ mod tests {
                 tunnel_active: Default::default(),
             },
         );
+        state
+            .session_usernames
+            .write()
+            .await
+            .insert(session_id.to_owned(), Arc::from("test-user"));
         let capability = state.capability().to_owned();
         let diagnostics = state.diagnostics.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

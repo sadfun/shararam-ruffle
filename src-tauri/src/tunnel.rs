@@ -38,6 +38,30 @@ pub async fn run(
     endpoint: String,
     diagnostics: Arc<RwLock<Diagnostics>>,
 ) {
+    run_inner(&mut websocket, &endpoint, None, diagnostics).await;
+}
+
+pub(crate) async fn run_for_user(
+    mut websocket: WebSocket,
+    endpoint: String,
+    username: Arc<str>,
+    diagnostics: Arc<RwLock<Diagnostics>>,
+) {
+    run_inner(
+        &mut websocket,
+        &endpoint,
+        Some(username.as_ref()),
+        diagnostics,
+    )
+    .await;
+}
+
+async fn run_inner(
+    websocket: &mut WebSocket,
+    endpoint: &str,
+    username: Option<&str>,
+    diagnostics: Arc<RwLock<Diagnostics>>,
+) {
     {
         let mut diagnostics = diagnostics.write().await;
         diagnostics.tunnel_connections += 1;
@@ -46,7 +70,7 @@ pub async fn run(
     }
 
     let mut counts = ByteCounts::default();
-    let result = copy(&mut websocket, &endpoint, &mut counts).await;
+    let result = copy(websocket, endpoint, username, &mut counts).await;
     {
         let mut diagnostics = diagnostics.write().await;
         diagnostics.tunnel_closes += 1;
@@ -58,17 +82,42 @@ pub async fn run(
         }
     }
     if let Err(error) = result {
-        tracing::warn!("opaque socket tunnel ended: {error}");
+        tracing::warn!(error = %error, "opaque socket tunnel ended");
     }
     let _ = websocket.close().await;
 }
 
-async fn copy(websocket: &mut WebSocket, endpoint: &str, counts: &mut ByteCounts) -> Result<()> {
+async fn copy(
+    websocket: &mut WebSocket,
+    endpoint: &str,
+    username: Option<&str>,
+    counts: &mut ByteCounts,
+) -> Result<()> {
     let (host, port) = endpoint_target(endpoint)?;
     let tcp = TcpStream::connect((host.as_str(), port))
         .await
         .with_context(|| format!("could not connect to approved socket endpoint {host}:{port}"))?;
     tcp.set_nodelay(true)?;
+    if let Some(username) = username {
+        tracing::info!(username, host, port, "Connected to server as {username}");
+    }
+    let result = copy_connected(websocket, tcp, counts).await;
+    if let Some(username) = username {
+        tracing::info!(
+            username,
+            host,
+            port,
+            "Disconnected from server as {username}"
+        );
+    }
+    result
+}
+
+async fn copy_connected(
+    websocket: &mut WebSocket,
+    tcp: TcpStream,
+    counts: &mut ByteCounts,
+) -> Result<()> {
     let (mut tcp_reader, mut tcp_writer) = tcp.into_split();
     let mut buffer = vec![0; BUFFER_SIZE];
 
