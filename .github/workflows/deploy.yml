@@ -99,8 +99,6 @@ jobs:
       - name: Ship and restart
         run: |
           BIN=src-tauri/target/release/shararam-ruffle
-          CADDY_SNIPPET=deploy/ruffle-static.caddy
-          CADDY_INSTALLER=deploy/install-ruffle-static.sh
           STATIC_ARCHIVE="${RUNNER_TEMP}/shararam-static.tar.gz"
           SSH="ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
           SCP="scp -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
@@ -108,8 +106,6 @@ jobs:
 
           # Upload beside the live files, then swap only complete artifacts.
           $SCP "$BIN" "${TARGET}:${REMOTE_DIR}/${BINARY}.new"
-          $SCP "$CADDY_SNIPPET" "${TARGET}:${REMOTE_DIR}/ruffle-static.caddy.new"
-          $SCP "$CADDY_INSTALLER" "${TARGET}:${REMOTE_DIR}/install-ruffle-static.sh.new"
           $SCP "$STATIC_ARCHIVE" "${TARGET}:${REMOTE_DIR}/static.tar.gz.new"
           $SSH "$TARGET" "
             set -e
@@ -124,17 +120,12 @@ jobs:
               mv /opt/shararam/public /opt/shararam/public.old
             fi
             mv /opt/shararam/public.new /opt/shararam/public
-            sudo install -o root -g root -m 0644 /opt/shararam/ruffle-static.caddy.new /opt/shararam/ruffle-static.caddy
-            sudo install -o root -g root -m 0755 /opt/shararam/install-ruffle-static.sh.new /opt/shararam/install-ruffle-static.sh
-            sudo /opt/shararam/install-ruffle-static.sh
             mv ${REMOTE_DIR}/${BINARY}.new ${REMOTE_DIR}/${BINARY}
             chmod 755 ${REMOTE_DIR}/${BINARY}
             sudo systemctl restart shararam
             sleep 2
             sudo systemctl is-active shararam
             rm -rf /opt/shararam/public.old
-            rm -f /opt/shararam/ruffle-static.caddy.new
-            rm -f /opt/shararam/install-ruffle-static.sh.new
             rm -f /opt/shararam/static.tar.gz.new
           "
 

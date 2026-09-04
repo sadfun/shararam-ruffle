@@ -4,9 +4,9 @@ The public deployment workflow uploads Ruffle's files to
 `/opt/shararam/public/ruffle`. Files larger than 1 KiB have precompressed
 Brotli (`.br`) and gzip (`.gz`) sidecars generated once by CI.
 
-`install-ruffle-static.sh` imports `ruffle-static.caddy` inside the existing
-`shararam.sadfun.dev` site block, before its catch-all proxy handler. The
-result is equivalent to:
+As a one-time root bootstrap, `install-ruffle-static.sh` imports
+`ruffle-static.caddy` inside the existing `shararam.sadfun.dev` site block,
+before its catch-all proxy handler. The result is equivalent to:
 
 ```caddyfile
 shararam.sadfun.dev {
@@ -15,12 +15,9 @@ shararam.sadfun.dev {
 }
 ```
 
-The workflow performs this installation automatically. The deployment account
-needs passwordless sudo permission to execute
-`/opt/shararam/install-ruffle-static.sh`; the installer validates the candidate
-configuration and keeps a backup before replacing the active Caddyfile.
-
-To run the installation manually instead:
+Copy both files to `/opt/shararam`, then run the installer as root. It validates
+the candidate configuration and keeps a backup before replacing the active
+Caddyfile:
 
 ```sh
 sudo /opt/shararam/install-ruffle-static.sh
