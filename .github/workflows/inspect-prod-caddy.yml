@@ -1,0 +1,38 @@
+name: Inspect production Caddy access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Inspect non-sensitive Caddy access
+        env:
+          DEPLOY_HOST: 94.103.89.17
+          DEPLOY_USER: shararam
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -o BatchMode=yes \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" '
+              set -e
+              id
+              stat -c "caddyfile mode=%a owner=%U group=%G" /etc/caddy/Caddyfile
+              test -r /etc/caddy/Caddyfile && echo caddyfile_readable=yes || echo caddyfile_readable=no
+              test -w /etc/caddy/Caddyfile && echo caddyfile_writable=yes || echo caddyfile_writable=no
+              awk "/^[[:space:]]*(https?:\\/\\/)?shararam\\.sadfun\\.dev([,:[:space:]]|$).*\\{/ { matches++ } END { print \"site_matches=\" (matches + 0) }" /etc/caddy/Caddyfile
+              curl -fsS http://127.0.0.1:2019/config/ >/dev/null && echo caddy_admin=reachable || echo caddy_admin=unreachable
+              sudo -n -l || true
+            '
