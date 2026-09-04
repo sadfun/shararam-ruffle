@@ -1,0 +1,20 @@
+# Import this file inside the existing shararam.sadfun.dev site block, before
+# its catch-all reverse_proxy or handle block.
+
+@ruffle_fingerprinted path_regexp ruffle_fingerprinted ^/ruffle/([^/]*\.)?[0-9a-fA-F]{16,}\.[^/]+$
+
+handle /ruffle/* {
+	root * {$SHARARAM_STATIC_ROOT:/opt/shararam/public}
+
+	# Keep stable entry points revalidating, but cache content-addressed bundles
+	# forever. The order is intentional: the matched header overrides the default.
+	route {
+		header Cache-Control "public, no-cache"
+		header @ruffle_fingerprinted Cache-Control "public, max-age=31536000, immutable"
+		header X-Content-Type-Options nosniff
+		header Referrer-Policy no-referrer
+		file_server {
+			precompressed br gzip
+		}
+	}
+}

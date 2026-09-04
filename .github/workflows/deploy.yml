@@ -1,8 +1,8 @@
 name: Deploy public server
 
-# Builds the loopback companion in server-only mode and ships it to the host
-# that serves shararam.sadfun.dev behind Caddy. Runs on every push to main and
-# can be triggered by hand for the first deploy or a rollback.
+# Builds the loopback companion in server-only mode, precompresses Ruffle's
+# static assets, and ships both to the host behind Caddy. Runs on every push to
+# main and can be triggered by hand for the first deploy or a rollback.
 on:
   push:
     branches: [main]
@@ -38,7 +38,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake libclang-dev pkg-config
+          sudo apt-get install -y brotli build-essential clang cmake libclang-dev pkg-config
 
       - name: Select stable Rust
         run: |
@@ -68,6 +68,26 @@ jobs:
             --no-default-features
           test -x src-tauri/target/release/shararam-ruffle
 
+      - name: Precompress Ruffle assets
+        run: |
+          STATIC_STAGE="${RUNNER_TEMP}/shararam-static"
+          STATIC_ARCHIVE="${RUNNER_TEMP}/shararam-static.tar.gz"
+
+          mkdir -p "$STATIC_STAGE"
+          cp -a web/ruffle "$STATIC_STAGE/ruffle"
+
+          find "$STATIC_STAGE/ruffle" -type f -size +1024c \
+            ! -name '*.br' ! -name '*.gz' -print0 |
+            while IFS= read -r -d '' asset; do
+              brotli -q 11 -c "$asset" > "${asset}.br"
+              gzip -9 -c "$asset" > "${asset}.gz"
+              brotli -d -c "${asset}.br" | cmp -s "$asset" -
+              gzip -d -c "${asset}.gz" | cmp -s "$asset" -
+            done
+
+          tar -C "$STATIC_STAGE" -czf "$STATIC_ARCHIVE" ruffle
+          test -s "$STATIC_ARCHIVE"
+
       - name: Set up SSH
         run: |
           install -d -m 700 ~/.ssh
@@ -79,20 +99,43 @@ jobs:
       - name: Ship and restart
         run: |
           BIN=src-tauri/target/release/shararam-ruffle
+          CADDY_SNIPPET=deploy/ruffle-static.caddy
+          CADDY_INSTALLER=deploy/install-ruffle-static.sh
+          STATIC_ARCHIVE="${RUNNER_TEMP}/shararam-static.tar.gz"
           SSH="ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
           SCP="scp -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o BatchMode=yes"
           TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
-          # Upload beside the live binary, then swap and restart so a failed
-          # upload never leaves a half-written executable in place.
+          # Upload beside the live files, then swap only complete artifacts.
           $SCP "$BIN" "${TARGET}:${REMOTE_DIR}/${BINARY}.new"
+          $SCP "$CADDY_SNIPPET" "${TARGET}:${REMOTE_DIR}/ruffle-static.caddy.new"
+          $SCP "$CADDY_INSTALLER" "${TARGET}:${REMOTE_DIR}/install-ruffle-static.sh.new"
+          $SCP "$STATIC_ARCHIVE" "${TARGET}:${REMOTE_DIR}/static.tar.gz.new"
           $SSH "$TARGET" "
             set -e
+            rm -rf /opt/shararam/public.new
+            mkdir -p /opt/shararam/public.new
+            tar -xzf /opt/shararam/static.tar.gz.new -C /opt/shararam/public.new
+            test -n \"\$(find /opt/shararam/public.new/ruffle -maxdepth 1 -name '*.wasm.br' -print -quit)\"
+            test -n \"\$(find /opt/shararam/public.new/ruffle -maxdepth 1 -name '*.wasm.gz' -print -quit)\"
+
+            rm -rf /opt/shararam/public.old
+            if [ -d /opt/shararam/public ]; then
+              mv /opt/shararam/public /opt/shararam/public.old
+            fi
+            mv /opt/shararam/public.new /opt/shararam/public
+            sudo install -o root -g root -m 0644 /opt/shararam/ruffle-static.caddy.new /opt/shararam/ruffle-static.caddy
+            sudo install -o root -g root -m 0755 /opt/shararam/install-ruffle-static.sh.new /opt/shararam/install-ruffle-static.sh
+            sudo /opt/shararam/install-ruffle-static.sh
             mv ${REMOTE_DIR}/${BINARY}.new ${REMOTE_DIR}/${BINARY}
             chmod 755 ${REMOTE_DIR}/${BINARY}
             sudo systemctl restart shararam
             sleep 2
             sudo systemctl is-active shararam
+            rm -rf /opt/shararam/public.old
+            rm -f /opt/shararam/ruffle-static.caddy.new
+            rm -f /opt/shararam/install-ruffle-static.sh.new
+            rm -f /opt/shararam/static.tar.gz.new
           "
 
       - name: Verify the site is up
@@ -107,3 +150,14 @@ jobs:
           done
           echo "site did not return 200 after restart"
           exit 1
+
+      - name: Verify precompressed Ruffle delivery
+        run: |
+          wasm_path=$(find web/ruffle -maxdepth 1 -name '*.wasm' -printf '/ruffle/%f\n' -quit)
+          test -n "$wasm_path"
+
+          headers=$(curl -fsSI \
+            -H 'Accept-Encoding: br' \
+            "https://shararam.sadfun.dev${wasm_path}" | tr -d '\r')
+          grep -Fqx 'content-encoding: br' <<<"${headers,,}"
+          grep -Fqx 'vary: accept-encoding' <<<"${headers,,}"
