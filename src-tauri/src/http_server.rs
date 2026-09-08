@@ -939,10 +939,15 @@ mod tests {
             );
         }
 
+        // The bundle's fingerprint changes with every Ruffle rebuild: ask the
+        // embedded assets which wasm is shipped instead of hardcoding it.
+        let wasm = WebAssets::iter()
+            .find(|path| path.starts_with("ruffle/") && path.ends_with(".wasm"))
+            .expect("a fingerprinted Ruffle wasm is embedded");
         let response = router(AppState::new().unwrap())
             .oneshot(
                 Request::builder()
-                    .uri("/ruffle/f74720ae9023bbe37370.wasm")
+                    .uri(format!("/{wasm}"))
                     .body(Body::empty())
                     .unwrap(),
             )
