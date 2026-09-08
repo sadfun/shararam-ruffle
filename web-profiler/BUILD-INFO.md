@@ -6,9 +6,11 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `27f7d9a7f` (AVM1 stack sampler with position labels for
-  anonymous functions, allocation counters, screen command grid,
-  Array.sort span — see `docs/SHARARAM-PROFILER.md`)
+- revision: `8b9d74a7f` (blend groups rendered into bounds-sized
+  offscreen targets — 8.8→37.6 fps on a multiply-heavy room; plus the AVM1
+  stack sampler with position labels for anonymous functions, allocation
+  counters, screen command grid, Array.sort span — see
+  `docs/SHARARAM-PROFILER.md`)
 - build: `cd web && npm run build:shararam-profiler`
   (release profile + wasm-opt, identical to a regular build except for the
   `shararam_profiler` cargo feature)
