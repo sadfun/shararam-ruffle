@@ -6,7 +6,9 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `77bc79986` (multiply composited with a blend state on the opaque
+- revision: `24e5f275d` (parsed-movie cache: AVM1 loadMovie of an already
+  preloaded URL shares the movie and its library — 79% of preload time in a
+  Shararam session was repeats; multiply composited with a blend state on the opaque
   frame — no parent pass breaks; blend groups rendered into bounds-sized
   offscreen targets — 8.8→37.6 fps on a multiply-heavy room; plus the AVM1
   stack sampler with position labels for anonymous functions, allocation

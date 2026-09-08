@@ -138,7 +138,7 @@ export async function renderLoadsTab(
   onSelect: SelectHandler
 ) {
   const { rows } = await query(
-    "SELECT seq, ts_us, dur_us, source, name, args FROM events WHERE (cat = 'load' AND name IN ('movie_load_start','movie_data','movie_complete','movie_error','root_movie')) OR (cat = 'http' AND name IN ('fetch', 'resource', 'proxy')) ORDER BY ts_us"
+    "SELECT seq, ts_us, dur_us, source, name, args FROM events WHERE (cat = 'load' AND name IN ('movie_load_start','movie_data','movie_cache_hit','movie_complete','movie_error','root_movie')) OR (cat = 'http' AND name IN ('fetch', 'resource', 'proxy')) ORDER BY ts_us"
   );
   interface LoadRow {
     row: Row;

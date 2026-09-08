@@ -98,6 +98,7 @@ const ACTIVITY_NAMES: Record<string, string> = {
   "load/preload": "Прелоад SWF",
   "load/preload_tick": "Тик прелоада",
   "load/movie_data": "Приём данных SWF",
+  "load/movie_cache_hit": "Загрузка SWF: из кэша распарсенных",
   "load/movie_complete": "Загрузка SWF: завершена",
   "load/movie_load_start": "Загрузка SWF: старт",
   "load/movie_init_queued": "Загрузка SWF: в очереди",
