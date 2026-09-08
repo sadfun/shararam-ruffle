@@ -6,7 +6,8 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `8b9d74a7f` (blend groups rendered into bounds-sized
+- revision: `77bc79986` (multiply composited with a blend state on the opaque
+  frame — no parent pass breaks; blend groups rendered into bounds-sized
   offscreen targets — 8.8→37.6 fps on a multiply-heavy room; plus the AVM1
   stack sampler with position labels for anonymous functions, allocation
   counters, screen command grid, Array.sort span — see

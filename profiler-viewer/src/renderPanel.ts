@@ -25,6 +25,7 @@ const COUNTERS: { key: string; label: string; src: "sa" | "ra" }[] = [
   { key: "alpha_masks", label: "Alpha-маски", src: "sa" },
   { key: "blend_layer", label: "Layer-бленды", src: "sa" },
   { key: "blend_complex", label: "Сложные бленды", src: "sa" },
+  { key: "blend_multiply_direct", label: "Multiply без снимка бэкдропа", src: "sa" },
   { key: "blend_shader", label: "Shader-бленды", src: "sa" },
   { key: "cache_commands", label: "cacheAsBitmap: команды", src: "sa" },
   { key: "cache_entries", label: "cacheAsBitmap: записей в кэше", src: "sa" },
