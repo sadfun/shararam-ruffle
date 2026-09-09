@@ -6,11 +6,13 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `24e5f275d` (parsed-movie cache: AVM1 loadMovie of an already
-  preloaded URL shares the movie and its library — 79% of preload time in a
-  Shararam session was repeats; multiply composited with a blend state on the opaque
-  frame — no parent pass breaks; blend groups rendered into bounds-sized
-  offscreen targets — 8.8→37.6 fps on a multiply-heavy room; plus the AVM1
+- revision: `4a67bd03e` (frees the library of a loaded movie once no root
+  clip plays it — upstream keeps every `loadMovie`'s characters, renderer
+  meshes, bitmaps, fonts and SWF bytes for the life of the player, which is
+  why the post-GC heap only ever grew; on top of `24e5f275d`: parsed-movie
+  cache — AVM1 loadMovie of an already preloaded URL shares the movie and
+  its library; multiply composited with a blend state on the opaque frame;
+  blend groups rendered into bounds-sized offscreen targets; plus the AVM1
   stack sampler with position labels for anonymous functions, allocation
   counters, screen command grid, Array.sort span — see
   `docs/SHARARAM-PROFILER.md`)
