@@ -82,6 +82,8 @@ mod imp {
         /// writer thread.
         pub fn start(directory: Option<PathBuf>) -> Result<Self> {
             let directory = directory.unwrap_or_else(|| PathBuf::from("profiles"));
+            // Absolute so the badge shows a path a Windows user can find.
+            let directory = std::path::absolute(&directory).unwrap_or(directory);
             std::fs::create_dir_all(&directory)
                 .with_context(|| format!("cannot create {}", directory.display()))?;
             let stamp = chrono_like_stamp();

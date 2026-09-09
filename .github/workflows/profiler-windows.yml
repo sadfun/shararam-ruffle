@@ -1,0 +1,69 @@
+name: Profiler build (Windows x64)
+
+# Builds dist\Shararam-Ruffle-Profiler.exe from this branch: the desktop app
+# with the "profiler" feature (records each session into a DuckDB file, see
+# PROFILING.md) on top of the profiler-instrumented Ruffle in web-profiler/.
+# Run it by hand from the Actions tab or `gh workflow run`; it also runs when
+# this file itself changes on scout.
+on:
+  workflow_dispatch:
+  push:
+    branches: [scout]
+    paths: [".github/workflows/profiler-windows.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: windows-x86_64 profiler
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      SHARARAM_TARGET_DIR: ${{ github.workspace }}\target
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Select stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Configure native Windows build
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          $llvmDirectory = if ($clang) { Split-Path $clang.Source } else { $null }
+          if (-not $llvmDirectory -or -not (Test-Path (Join-Path $llvmDirectory 'libclang.dll'))) {
+            $libclang = Get-ChildItem -Path $env:ProgramFiles -Filter libclang.dll -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $libclang) {
+              throw 'Unable to locate libclang.dll on the Windows runner'
+            }
+            $llvmDirectory = $libclang.DirectoryName
+          }
+          "LIBCLANG_PATH=$llvmDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache Cargo inputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: profiler-windows-x86_64-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Build profiler exe
+        shell: pwsh
+        run: .\build.ps1 profiler
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shararam-Ruffle-Profiler-windows-x86_64
+          path: dist/Shararam-Ruffle-Profiler.exe
+          if-no-files-found: error

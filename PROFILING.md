@@ -34,6 +34,10 @@
 make profiler        # -> dist\Shararam-Ruffle-Profiler.exe
 ```
 
+Без Windows под рукой: workflow «Profiler build (Windows x64)» в GitHub
+Actions (`gh workflow run profiler-windows.yml --ref scout`) собирает тот же
+exe и кладёт его артефактом `Shararam-Ruffle-Profiler-windows-x86_64`.
+
 ```sh
 # macOS/Linux (дев-запуск без бандла)
 cargo run --manifest-path src-tauri/Cargo.toml --release \
