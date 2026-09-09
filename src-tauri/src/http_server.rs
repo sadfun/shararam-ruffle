@@ -742,7 +742,8 @@ async fn official_proxy(
         Ok(status) => status,
         Err(error) => return internal(error),
     };
-    let response_headers = official_response_headers(upstream.headers());
+    let mut response_headers = official_response_headers(upstream.headers());
+    pin_asset_cache(&path, &mut response_headers);
     if path.eq_ignore_ascii_case("async/ServerAction") {
         let bytes = match upstream.bytes().await {
             Ok(bytes) => bytes,
@@ -781,6 +782,17 @@ where
     Body::from_stream(
         upstream.map(|item| item.map_err(|error| std::io::Error::other(error.to_string()))),
     )
+}
+
+/// `/fs/` assets are content-addressed (hash in the name, version in the
+/// query) and the upstream sends no Cache-Control at all, leaving browsers to
+/// heuristics. Pin them: the WebView then keeps them for good and serves a
+/// room entry's identical parallel loads (the avatar rig, once per avatar)
+/// from one download instead of one request each.
+fn pin_asset_cache(path: &str, headers: &mut HeaderMap) {
+    if path.starts_with("fs/") {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(IMMUTABLE_CACHE));
+    }
 }
 
 fn official_response_headers(source: &wreq_transport::header::HeaderMap) -> HeaderMap {
@@ -906,6 +918,16 @@ mod tests {
             NO_STORE
         );
         assert!(response.headers().get(header::ETAG).is_none());
+    }
+
+    #[test]
+    fn game_assets_are_pinned_in_the_webview_cache() {
+        let mut asset = HeaderMap::new();
+        pin_asset_cache("fs/ek/4pydl5s0lc.swf", &mut asset);
+        assert_eq!(asset.get(header::CACHE_CONTROL).unwrap(), IMMUTABLE_CACHE);
+        let mut api = HeaderMap::new();
+        pin_asset_cache("async/ServerAction", &mut api);
+        assert!(api.get(header::CACHE_CONTROL).is_none());
     }
 
     #[tokio::test]
