@@ -6,7 +6,10 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `4a67bd03e` (frees the library of a loaded movie once no root
+- revision: `e0d829d21` (grows wasm memory in 64 MiB chunks instead of dlmalloc's
+  64 KiB — on Windows/Chromium every `memory.grow` costs 1–10 ms in the
+  kernel, so a tick needing 30 MB of fresh heap froze for seconds; on top of
+  `4a67bd03e`: frees the library of a loaded movie once no root
   clip plays it — upstream keeps every `loadMovie`'s characters, renderer
   meshes, bitmaps, fonts and SWF bytes for the life of the player, which is
   why the post-GC heap only ever grew; on top of `24e5f275d`: parsed-movie
