@@ -67,3 +67,30 @@ jobs:
           name: Shararam-Ruffle-Profiler-windows-x86_64
           path: dist/Shararam-Ruffle-Profiler.exe
           if-no-files-found: error
+
+      # The samplers (WebView2 process CPU, GPU counters, renderer native
+      # stacks) only run against a live WebView2; there is no Windows machine
+      # at hand, so exercise the exe on the runner for a minute and show what
+      # the profile recorded. The window is closed the normal way so the
+      # profile is finalised like a user's.
+      - name: Smoke-run the exe and inspect its profile
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'smoke-profile'
+          $proc = Start-Process -FilePath (Resolve-Path dist\Shararam-Ruffle-Profiler.exe) -ArgumentList '--profile-dir', "`"$dir`"" -PassThru
+          Start-Sleep -Seconds 60
+          if (-not $proc.HasExited) { $null = $proc.CloseMainWindow(); Start-Sleep -Seconds 15 }
+          if (-not $proc.HasExited) { Write-Host 'window close did not exit the process; killing'; $proc.Kill() }
+          Get-ChildItem $dir
+          pip install --quiet duckdb
+          $profile = Get-ChildItem $dir -Filter *.duckdb | Select-Object -First 1
+          python scripts/smoke_profile.py $profile.FullName | Tee-Object -FilePath (Join-Path $dir 'summary.txt')
+          Get-Content (Join-Path $dir 'summary.txt') | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload smoke profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-profile
+          path: ${{ runner.temp }}/smoke-profile/
+          if-no-files-found: warn

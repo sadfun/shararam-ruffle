@@ -187,7 +187,7 @@
     // Skip our own telemetry traffic.
     if (entry.name.includes("/api/profiler/")) return;
     event("http", "resource", entry.startTime, entry.duration, {
-      url: entry.name.replace(location.origin, ""),
+      url: entry.name.replace(location.origin, "").replace(/^http:\/\/(?:127\.0\.0\.1|localhost):\d+/, ""),
       type: entry.initiatorType,
       status: entry.responseStatus,
       transfer: entry.transferSize,

@@ -45,6 +45,12 @@ const CAPABILITY_PLACEHOLDER: &str = "__SHARARAM_CAP__";
 /// Replaced in the served `index.html` with `1` when this is a profiling
 /// build, so the page loads `profiler.js`.
 const PROFILER_PLACEHOLDER: &str = "__SHARARAM_PROFILER__";
+/// Replaced in index.html by the asset shard ports (see `main.rs`).
+const ASSET_PORTS_PLACEHOLDER: &str = "__SHARARAM_ASSET_PORTS__";
+/// Extra loopback listeners for `/official/fs/`: a browser opens at most six
+/// connections per origin, so a few slow upstream downloads would otherwise
+/// queue every other asset (disk-cache hits included) behind them.
+pub const ASSET_SHARDS: usize = 4;
 
 pub fn router(state: AppState) -> Router {
     state.asset_cache.spawn_trim();
@@ -70,7 +76,31 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn security_headers(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|origin| state.is_own_loopback_origin(origin))
+        .map(str::to_owned);
     let mut response = next.run(request).await;
+    // The page (main port) fetches assets from our shard ports with cookies;
+    // allow exactly our own origins and keep resource timing readable.
+    if let Some(origin) = origin
+        && let Ok(origin) = HeaderValue::from_str(&origin)
+    {
+        let headers = response.headers_mut();
+        headers.insert("access-control-allow-origin", origin.clone());
+        headers.insert(
+            "access-control-allow-credentials",
+            HeaderValue::from_static("true"),
+        );
+        headers.insert("timing-allow-origin", origin);
+        headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+        headers.insert(
+            "cross-origin-resource-policy",
+            HeaderValue::from_static("cross-origin"),
+        );
+    }
     response.headers_mut().insert(
         "content-security-policy",
         HeaderValue::from_str(&content_security_policy(&state)).expect("static CSP is header-safe"),
@@ -105,7 +135,7 @@ async fn security_headers(State(state): State<AppState>, request: Request, next:
 fn content_security_policy(state: &AppState) -> String {
     let connect_src = match state.public_host() {
         Some(host) => format!("connect-src 'self' wss://{host}"),
-        None => "connect-src 'self' ws://127.0.0.1:* ws://localhost:*".to_string(),
+        None => "connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*".to_string(),
     };
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; {connect_src}; \
@@ -115,23 +145,24 @@ fn content_security_policy(state: &AppState) -> String {
 }
 
 async fn static_index(State(state): State<AppState>) -> Response {
-    static_response("index.html", Some(state.capability()))
+    static_response("index.html", Some(&state))
 }
 async fn static_asset(State(state): State<AppState>, Path(path): Path<String>) -> Response {
     // The capability token reaches remote browsers only through the served
     // page; every other asset is returned verbatim.
-    let inject = (path == "index.html").then(|| state.capability());
+    let inject = (path == "index.html").then_some(&state);
     static_response(&path, inject)
 }
 
-fn static_response(path: &str, inject_capability: Option<&str>) -> Response {
+fn static_response(path: &str, inject: Option<&AppState>) -> Response {
     match embedded_asset(path) {
         Some(asset) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let body = match inject_capability {
-                Some(capability) => Body::from(
+            let body = match inject {
+                Some(state) => Body::from(
                     String::from_utf8_lossy(&asset.data)
-                        .replace(CAPABILITY_PLACEHOLDER, capability)
+                        .replace(CAPABILITY_PLACEHOLDER, state.capability())
+                        .replace(ASSET_PORTS_PLACEHOLDER, &state.asset_ports_csv())
                         .replace(
                             PROFILER_PLACEHOLDER,
                             if cfg!(feature = "profiler") { "1" } else { "0" },
@@ -872,13 +903,11 @@ async fn official_proxy(
     let headers_at = profiler::now_us();
     let mut response_headers = official_response_headers(upstream.headers());
     if path.starts_with("fs/") {
-        // The local disk cache owns asset persistence. Keeping the WebView's
-        // HTTP cache out of the loop makes SWF-patch toggles apply instantly
-        // and prevents stale patched bytes from surviving a config change
-        // (the WebView cache persists across launches on the stable port).
-        response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response_headers.remove(header::ETAG);
-        response_headers.remove(header::LAST_MODIFIED);
+        response_headers.insert(header::CACHE_CONTROL, asset_cache_control());
+        if swf_patch::enabled() {
+            response_headers.remove(header::ETAG);
+            response_headers.remove(header::LAST_MODIFIED);
+        }
     }
     if path.eq_ignore_ascii_case("async/ServerAction") {
         let bytes = match upstream.bytes().await {
@@ -1092,6 +1121,21 @@ async fn buffered_proxy_response(
 
 /// Serves a disk-cache hit for an immutable `/fs/` asset. SWF patching, when
 /// enabled, is applied to the cached original on the way out.
+/// `/fs/` URLs are content-addressed (hash in the name, version in the
+/// query), so the WebView may keep them for good: a room entry that asks for
+/// the same avatar rig nine times in one tick then costs one request, and
+/// later loads cost none. The disk cache stays the cross-launch layer (the
+/// loopback port changes per launch, and so does the WebView's cache key).
+/// SWF-patch experiments need the WebView to re-request so a config toggle
+/// applies at once; that mode keeps `no-store`.
+fn asset_cache_control() -> HeaderValue {
+    if swf_patch::enabled() {
+        HeaderValue::from_static("no-store")
+    } else {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    }
+}
+
 fn asset_response(path: &str, body: Vec<u8>, content_type: Option<String>) -> Response {
     let is_swf = path
         .rsplit('/')
@@ -1118,9 +1162,7 @@ fn asset_response(path: &str, body: Vec<u8>, content_type: Option<String>) -> Re
             .unwrap()
         });
     headers.insert(header::CONTENT_TYPE, content_type);
-    // The disk cache is the only persistence layer; the WebView must
-    // re-request so patch-config changes always apply (hits are local).
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::CACHE_CONTROL, asset_cache_control());
     headers.insert("x-shararam-asset-cache", HeaderValue::from_static("hit"));
     if patched {
         headers.insert(
@@ -1363,6 +1405,57 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains(&format!("content=\"{capability}\"")));
         assert!(!body.contains(CAPABILITY_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    async fn asset_shards_get_cors_only_for_our_own_loopback_origins() {
+        let state = AppState::new().unwrap().with_ports(8787, vec![8788, 8789]);
+        let ask = |origin: &'static str| {
+            router(state.clone()).oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ORIGIN, origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let ours = ask("http://127.0.0.1:8787").await.unwrap();
+        assert_eq!(
+            ours.headers().get("access-control-allow-origin").unwrap(),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            ours.headers().get("access-control-allow-credentials").unwrap(),
+            "true"
+        );
+        let csp = ours
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("http://127.0.0.1:*"));
+        // Another local web app must not read our proxy with the user's cookies.
+        let foreign = ask("http://127.0.0.1:9999").await.unwrap();
+        assert!(foreign.headers().get("access-control-allow-origin").is_none());
+        let page = String::from_utf8(
+            to_bytes(ask("http://127.0.0.1:8787").await.unwrap().into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(page.contains("name=\"shararam-asset-ports\" content=\"8788,8789\""));
+        assert!(!page.contains(ASSET_PORTS_PLACEHOLDER));
+    }
+
+    #[test]
+    fn game_assets_are_immutable_for_the_webview_cache() {
+        let response = asset_response("fs/ek/4pydl5s0lc.swf", vec![0x46, 0x57, 0x53], None);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
     }
 
     #[test]

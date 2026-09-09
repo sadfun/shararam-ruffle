@@ -60,12 +60,13 @@ async fn main() -> Result<()> {
         if let Some(path) = profiler.path() {
             println!("Profiling to {}", path.display());
         }
-        // `--sample-webcontent`: record native main-thread stacks of the
-        // WKWebView WebContent process with /usr/bin/sample (diagnostic —
-        // sampling suspends the target's threads on every tick).
-        if args.iter().any(|arg| arg == "--sample-webcontent") {
+        // Native main-thread stacks of the browser's page process (WebContent
+        // on macOS via /usr/bin/sample, the WebView2 renderer on Windows via
+        // dbghelp) are on by default; `--no-webcontent-stacks` turns the
+        // sampler off — it suspends the target's thread on every tick.
+        if !args.iter().any(|arg| arg == "--no-webcontent-stacks") {
             shararam_ruffle::profiler::spawn_webcontent_sampler(profiler.clone());
-            println!("Sampling WebContent native stacks (--sample-webcontent)");
+            println!("Sampling page-process native stacks (--no-webcontent-stacks disables)");
         }
         profiler
     } else {
@@ -82,8 +83,27 @@ async fn main() -> Result<()> {
     };
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, requested_port)).await?;
     let address = listener.local_addr()?;
+    // Extra loopback listeners over which the page spreads `/official/fs/`
+    // loads (see http_server::ASSET_SHARDS); public mode has one origin.
+    let mut shard_listeners = Vec::new();
+    if public_host.is_none() {
+        for _ in 0..http_server::ASSET_SHARDS {
+            shard_listeners.push(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?);
+        }
+    }
+    let mut shard_ports = Vec::new();
+    for listener in &shard_listeners {
+        shard_ports.push(listener.local_addr()?.port());
+    }
+    let state = state.with_ports(address.port(), shard_ports);
     let capability = state.capability().to_owned();
     let router = http_server::router(state);
+    for listener in shard_listeners {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+    }
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     if let Some(host) = &public_host {
@@ -95,16 +115,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Screen recording (profiling builds): `--rec [fps]` puts `rec=` into the
-    // opened URL, since the desktop window has no address bar to type it in.
-    // The page ignores the flag outside profiling builds.
-    let recording = args.iter().position(|arg| arg == "--rec").map(|index| {
-        args.get(index + 1)
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|fps| *fps > 0.0)
-            .map(|fps| fps.to_string())
-            .unwrap_or_else(|| "1".into())
-    });
+    // Screen recording (profiling builds): on by default at 1 fps, since the
+    // desktop window has no address bar to type `?rec=` into. `--rec <fps>`
+    // changes the rate, `--no-rec` turns it off. Other builds ignore it.
+    let recording = if !cfg!(feature = "profiler") || args.iter().any(|arg| arg == "--no-rec") {
+        None
+    } else {
+        Some(
+            args.iter()
+                .position(|arg| arg == "--rec")
+                .and_then(|index| args.get(index + 1))
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|fps| *fps > 0.0)
+                .map(|fps| fps.to_string())
+                .unwrap_or_else(|| "1".into()),
+        )
+    };
     let mut url = format!("http://127.0.0.1:{}/?cap={}", address.port(), capability);
     if let Some(fps) = &recording {
         url.push_str(&format!("&rec={fps}"));

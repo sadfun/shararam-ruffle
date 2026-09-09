@@ -486,17 +486,382 @@ mod imp {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Per-process CPU gauges (Windows). WebView2 runs the page in Chromium
+    /// helper processes (`msedgewebview2.exe`, descendants of our own): the
+    /// renderer executes JS + wasm, the GPU process talks to D3D, the browser
+    /// process composites. Sampled every 500 ms into `cpu_client_pct` /
+    /// `cpu_webcontent_pct` (renderers) / `cpu_gpu_pct` / `cpu_browser_pct`
+    /// (percent of one core), plus `gpu_pct` from the "GPU Engine"
+    /// performance counters (3D engines, capped at 100).
+    #[cfg(windows)]
+    mod cpu {
+        use super::Profiler;
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, FILETIME, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+        };
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessTimes, GetThreadDescription, OpenProcess, OpenThread,
+            PROCESS_QUERY_LIMITED_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
+        };
+
+        const SAMPLE_EVERY: Duration = Duration::from_millis(500);
+        /// Helper processes come and go; re-discover them every N samples.
+        const RESCAN_EVERY: u32 = 4;
+        const WEBVIEW_EXE: &str = "msedgewebview2.exe";
+
+        pub fn spawn_sampler(profiler: Profiler) {
+            let _ = std::thread::Builder::new()
+                .name("profiler-cpu".into())
+                .spawn(move || run(profiler));
+        }
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub(super) enum Kind {
+            Browser,
+            Renderer,
+            Gpu,
+            Other,
+        }
+
+        struct Tracked {
+            pid: u32,
+            name: &'static str,
+            last_100ns: u64,
+        }
+
+        fn run(profiler: Profiler) {
+            let own = std::process::id();
+            let mut kinds: HashMap<u32, Kind> = HashMap::new();
+            let mut tracked: Vec<Tracked> = Vec::new();
+            let mut gpu = gpu::Counter::open();
+            let mut tick = 0u32;
+            let mut last_wall = Instant::now();
+            loop {
+                std::thread::sleep(SAMPLE_EVERY);
+                if tick % RESCAN_EVERY == 0 {
+                    tracked = discover(own, &tracked, &mut kinds);
+                }
+                tick = tick.wrapping_add(1);
+                let wall = Instant::now();
+                let elapsed = wall.duration_since(last_wall).as_secs_f64();
+                last_wall = wall;
+                if elapsed <= 0.0 {
+                    continue;
+                }
+                let mut by_name: HashMap<&'static str, f64> = HashMap::new();
+                for entry in &mut tracked {
+                    let Some(now) = cpu_time_100ns(entry.pid) else {
+                        continue;
+                    };
+                    if entry.last_100ns > 0 && now >= entry.last_100ns {
+                        let pct = (now - entry.last_100ns) as f64 / 1e7 / elapsed * 100.0;
+                        *by_name.entry(entry.name).or_default() += pct;
+                    }
+                    entry.last_100ns = now;
+                }
+                for (name, pct) in by_name {
+                    profiler.sample(name, (pct * 10.0).round() / 10.0);
+                }
+                if let Some(counter) = gpu.as_mut()
+                    && let Some(pct) = counter.utilization_3d()
+                {
+                    profiler.sample("gpu_pct", (pct * 10.0).round() / 10.0);
+                }
+            }
+        }
+
+        /// Our own process plus the WebView2 helpers below it in the process
+        /// tree, classified by their Chromium main-thread names.
+        fn discover(own: u32, previous: &[Tracked], kinds: &mut HashMap<u32, Kind>) -> Vec<Tracked> {
+            let carry = |pid: u32, name: &'static str| Tracked {
+                pid,
+                name,
+                last_100ns: previous
+                    .iter()
+                    .find(|t| t.pid == pid && t.name == name)
+                    .map(|t| t.last_100ns)
+                    .unwrap_or(0),
+            };
+            let mut out = vec![carry(own, "cpu_client_pct")];
+            for pid in webview_helpers(own) {
+                let kind = *kinds.entry(pid).or_insert_with(|| classify(pid));
+                let name = match kind {
+                    Kind::Renderer => "cpu_webcontent_pct",
+                    Kind::Gpu => "cpu_gpu_pct",
+                    Kind::Browser => "cpu_browser_pct",
+                    Kind::Other => continue,
+                };
+                out.push(carry(pid, name));
+            }
+            kinds.retain(|pid, _| out.iter().any(|t| t.pid == *pid));
+            out
+        }
+
+        pub(super) struct Process {
+            pub pid: u32,
+            pub parent: u32,
+            pub exe: String,
+        }
+
+        /// `msedgewebview2.exe` processes that descend from `own`.
+        pub(super) fn webview_helpers(own: u32) -> Vec<u32> {
+            let processes = snapshot_processes();
+            let mut helpers: Vec<u32> = Vec::new();
+            let mut frontier = vec![own];
+            while let Some(parent) = frontier.pop() {
+                for process in &processes {
+                    if process.parent == parent
+                        && process.pid != parent
+                        && process.exe.eq_ignore_ascii_case(WEBVIEW_EXE)
+                        && !helpers.contains(&process.pid)
+                    {
+                        helpers.push(process.pid);
+                        frontier.push(process.pid);
+                    }
+                }
+            }
+            helpers
+        }
+
+        pub(super) fn snapshot_processes() -> Vec<Process> {
+            let mut out = Vec::new();
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if snapshot == INVALID_HANDLE_VALUE {
+                    return out;
+                }
+                let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32FirstW(snapshot, &mut entry) != 0 {
+                    loop {
+                        out.push(Process {
+                            pid: entry.th32ProcessID,
+                            parent: entry.th32ParentProcessID,
+                            exe: wide_str(&entry.szExeFile),
+                        });
+                        if Process32NextW(snapshot, &mut entry) == 0 {
+                            break;
+                        }
+                    }
+                }
+                CloseHandle(snapshot);
+            }
+            out
+        }
+
+        /// Thread ids and names (`SetThreadDescription`) of a process.
+        pub(super) fn threads_of(pid: u32) -> Vec<(u32, String)> {
+            let mut out = Vec::new();
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if snapshot == INVALID_HANDLE_VALUE {
+                    return out;
+                }
+                let mut entry: THREADENTRY32 = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+                if Thread32First(snapshot, &mut entry) != 0 {
+                    loop {
+                        if entry.th32OwnerProcessID == pid {
+                            let name = thread_name(entry.th32ThreadID).unwrap_or_default();
+                            out.push((entry.th32ThreadID, name));
+                        }
+                        if Thread32Next(snapshot, &mut entry) == 0 {
+                            break;
+                        }
+                    }
+                }
+                CloseHandle(snapshot);
+            }
+            out
+        }
+
+        fn thread_name(tid: u32) -> Option<String> {
+            unsafe {
+                let thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid);
+                if thread.is_null() {
+                    return None;
+                }
+                let mut description: *mut u16 = std::ptr::null_mut();
+                let result = GetThreadDescription(thread, &mut description);
+                CloseHandle(thread);
+                if result < 0 || description.is_null() {
+                    return None;
+                }
+                let len = (0..).take_while(|&i| *description.add(i) != 0).count();
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(description, len));
+                LocalFree(description as HLOCAL);
+                Some(name)
+            }
+        }
+
+        /// Chromium names its main threads: CrRendererMain / CrGpuMain /
+        /// CrBrowserMain (utility and other helpers are ignored).
+        pub(super) fn classify(pid: u32) -> Kind {
+            let threads = threads_of(pid);
+            let has = |name: &str| threads.iter().any(|(_, n)| n == name);
+            if has("CrRendererMain") {
+                Kind::Renderer
+            } else if has("CrGpuMain") {
+                Kind::Gpu
+            } else if has("CrBrowserMain") {
+                Kind::Browser
+            } else {
+                Kind::Other
+            }
+        }
+
+        /// kernel + user CPU time of a process in 100 ns units.
+        fn cpu_time_100ns(pid: u32) -> Option<u64> {
+            unsafe {
+                let own = pid == std::process::id();
+                let process = if own {
+                    GetCurrentProcess()
+                } else {
+                    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+                };
+                if process.is_null() {
+                    return None;
+                }
+                let zero = FILETIME {
+                    dwLowDateTime: 0,
+                    dwHighDateTime: 0,
+                };
+                let mut times = [zero; 4];
+                let ok = GetProcessTimes(
+                    process,
+                    &mut times[0],
+                    &mut times[1],
+                    &mut times[2],
+                    &mut times[3],
+                );
+                if !own {
+                    CloseHandle(process);
+                }
+                if ok == 0 {
+                    return None;
+                }
+                let as_u64 =
+                    |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+                Some(as_u64(times[2]) + as_u64(times[3]))
+            }
+        }
+
+        pub(super) fn wide_str(buffer: &[u16]) -> String {
+            let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+            String::from_utf16_lossy(&buffer[..len])
+        }
+
+        /// GPU utilisation from the "GPU Engine" performance counters (what
+        /// Task Manager's GPU column reads): the sum of every process's 3D
+        /// engine share, capped at 100.
+        mod gpu {
+            use windows_sys::Win32::System::Performance::{
+                PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_MORE_DATA, PdhAddEnglishCounterW,
+                PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
+            };
+
+            pub struct Counter {
+                query: *mut std::ffi::c_void,
+                counter: *mut std::ffi::c_void,
+            }
+
+            impl Counter {
+                pub fn open() -> Option<Self> {
+                    let mut query = std::ptr::null_mut();
+                    let mut counter = std::ptr::null_mut();
+                    unsafe {
+                        if PdhOpenQueryW(std::ptr::null(), 0, &mut query) != 0 {
+                            return None;
+                        }
+                        let path: Vec<u16> = "\\GPU Engine(*)\\Utilization Percentage"
+                            .encode_utf16()
+                            .chain([0])
+                            .collect();
+                        if PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) != 0 {
+                            PdhCloseQuery(query);
+                            return None;
+                        }
+                        // Rate counters need two collections; prime the first.
+                        PdhCollectQueryData(query);
+                    }
+                    Some(Self { query, counter })
+                }
+
+                pub fn utilization_3d(&mut self) -> Option<f64> {
+                    unsafe {
+                        if PdhCollectQueryData(self.query) != 0 {
+                            return None;
+                        }
+                        let mut size = 0u32;
+                        let mut count = 0u32;
+                        let status = PdhGetFormattedCounterArrayW(
+                            self.counter,
+                            PDH_FMT_DOUBLE,
+                            &mut size,
+                            &mut count,
+                            std::ptr::null_mut(),
+                        );
+                        if status != PDH_MORE_DATA || size == 0 {
+                            return None;
+                        }
+                        let mut buffer = vec![0u64; size as usize / 8 + 1];
+                        let items = buffer.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
+                        if PdhGetFormattedCounterArrayW(
+                            self.counter,
+                            PDH_FMT_DOUBLE,
+                            &mut size,
+                            &mut count,
+                            items,
+                        ) != 0
+                        {
+                            return None;
+                        }
+                        let mut total = 0.0;
+                        for index in 0..count as usize {
+                            let item = &*items.add(index);
+                            if item.FmtValue.CStatus != 0 || item.szName.is_null() {
+                                continue;
+                            }
+                            let len = (0..).take_while(|&i| *item.szName.add(i) != 0).count();
+                            let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+                                item.szName,
+                                len,
+                            ));
+                            if name.contains("engtype_3D") {
+                                total += item.FmtValue.Anonymous.doubleValue;
+                            }
+                        }
+                        Some(total.min(100.0))
+                    }
+                }
+            }
+
+            impl Drop for Counter {
+                fn drop(&mut self) {
+                    unsafe {
+                        PdhCloseQuery(self.query);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     mod cpu {
         pub fn spawn_sampler(_profiler: super::Profiler) {}
     }
 
     /// Native main-thread stacks of the WebContent process, recorded with
-    /// `/usr/bin/sample` in ~5 s chunks (opt-in: `--sample-webcontent`).
+    /// `/usr/bin/sample` in ~5 s chunks.
     /// This answers what WebKit itself is doing while the page's main thread
     /// is frozen outside JS (layer commits, GPU-process IPC, JSC GC, …) —
     /// nothing inside the page can see that. Sampling suspends the target's
-    /// threads on every tick, so it stays a diagnostic flag, never a default.
+    /// threads on every tick; `--no-webcontent-stacks` turns it off.
     #[cfg(target_os = "macos")]
     mod native_stacks {
         use super::Profiler;
@@ -680,13 +1045,375 @@ Total number in stack (recursive counted multiple, when >=5):
         }
     }
 
-    /// Starts the WebContent native-stack sampler (`--sample-webcontent`).
+    /// Starts the WebContent native-stack sampler.
     #[cfg(target_os = "macos")]
     pub fn spawn_webcontent_sampler(profiler: Profiler) {
         native_stacks::spawn(profiler);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Native stacks of the WebView2 renderer's main thread (CrRendererMain),
+    /// the Windows counterpart of sampling WebContent with `/usr/bin/sample`:
+    /// the thread is suspended every 4 ms, walked with dbghelp (unwind tables
+    /// come from the loaded images, so no symbols are needed to walk), and
+    /// each 5 s chunk is reported as its hottest leaf chains. Names resolve
+    /// only where dbghelp finds symbols (exports, local PDBs); everything
+    /// else is `module+0xrva`, and a `native/wc_modules` event carries the
+    /// PDB keys so a profile can be symbolised offline against the Microsoft
+    /// symbol server.
+    #[cfg(windows)]
+    mod native_stacks {
+        use super::Profiler;
+        use std::collections::HashMap;
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::Diagnostics::Debug::{
+            AddrModeFlat, CONTEXT, GetThreadContext, IMAGEHLP_MODULEW64, STACKFRAME64,
+            SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_NO_PROMPTS, SYMOPT_UNDNAME, StackWalk64,
+            SymCleanup, SymFromAddrW, SymFunctionTableAccess64, SymGetModuleBase64,
+            SymGetModuleInfoW64, SymInitializeW, SymSetOptions,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetThreadTimes, OpenProcess, OpenThread, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+            ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
+            THREAD_SUSPEND_RESUME,
+        };
+
+        const CHUNK: Duration = Duration::from_secs(5);
+        const INTERVAL: Duration = Duration::from_millis(4);
+        const MAX_FRAMES: usize = 32;
+        const TOP_STACKS: usize = 10;
+        const TAIL_FRAMES: usize = 8;
+        const MAX_NAME: usize = 512;
+        const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
+        const CONTEXT_CONTROL_AMD64: u32 = 0x0010_0001;
+        const CONTEXT_INTEGER_AMD64: u32 = 0x0010_0002;
+
+        pub fn spawn(profiler: Profiler) {
+            let _ = std::thread::Builder::new()
+                .name("profiler-wc-sample".into())
+                .spawn(move || run(profiler));
+        }
+
+        fn run(profiler: Profiler) {
+            let own = std::process::id();
+            loop {
+                let Some((pid, tid)) = find_renderer_main(own) else {
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                };
+                let Some(mut target) = Target::open(pid, tid) else {
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                };
+                let mut modules_reported = 0usize;
+                loop {
+                    let started_us = super::super::now_us();
+                    let started = Instant::now();
+                    let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
+                    let mut total = 0u64;
+                    let mut failures = 0u32;
+                    while started.elapsed() < CHUNK && failures < 50 {
+                        std::thread::sleep(INTERVAL);
+                        match target.sample() {
+                            Some(stack) => {
+                                total += 1;
+                                *counts.entry(stack).or_default() += 1;
+                            }
+                            None => failures += 1,
+                        }
+                    }
+                    let dur_us = super::super::now_us() - started_us;
+                    if total == 0 {
+                        break; // the renderer went away; rediscover
+                    }
+                    let mut chains: HashMap<String, u64> = HashMap::new();
+                    for (stack, count) in &counts {
+                        let chain = stack
+                            .iter()
+                            .take(TAIL_FRAMES)
+                            .map(|&pc| target.symbolize(pc))
+                            .collect::<Vec<_>>()
+                            .join(" ← ");
+                        *chains.entry(chain).or_default() += count;
+                    }
+                    let mut stacks: Vec<(u64, String)> =
+                        chains.into_iter().map(|(chain, n)| (n, chain)).collect();
+                    stacks.sort_by(|a, b| b.0.cmp(&a.0));
+                    stacks.truncate(TOP_STACKS);
+                    let mut args = String::with_capacity(2048);
+                    let _ = write!(args, "{{\"pid\":{pid},\"total\":{total},\"stacks\":[");
+                    for (index, (count, chain)) in stacks.iter().enumerate() {
+                        if index > 0 {
+                            args.push(',');
+                        }
+                        let chain = serde_json::to_string(chain).unwrap_or_default();
+                        let _ = write!(args, "[{count},{chain}]");
+                    }
+                    args.push_str("]}");
+                    profiler.event("native", "wc_stacks", started_us, dur_us, Some(args));
+                    if target.modules.len() > modules_reported {
+                        modules_reported = target.modules.len();
+                        profiler.event(
+                            "native",
+                            "wc_modules",
+                            started_us,
+                            0,
+                            Some(target.modules_json()),
+                        );
+                    }
+                    if failures >= 50 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        /// The WebView2 renderer's main thread: of every renderer below us in
+        /// the process tree, the one whose main thread has burnt the most CPU
+        /// (the page; other renderers are idle helpers).
+        fn find_renderer_main(own: u32) -> Option<(u32, u32)> {
+            let mut best: Option<(u64, u32, u32)> = None;
+            for pid in super::cpu::webview_helpers(own) {
+                for (tid, name) in super::cpu::threads_of(pid) {
+                    if name != "CrRendererMain" {
+                        continue;
+                    }
+                    let cpu = thread_cpu_100ns(tid).unwrap_or(0);
+                    if best.is_none_or(|(best_cpu, _, _)| cpu > best_cpu) {
+                        best = Some((cpu, pid, tid));
+                    }
+                }
+            }
+            best.map(|(_, pid, tid)| (pid, tid))
+        }
+
+        fn thread_cpu_100ns(tid: u32) -> Option<u64> {
+            unsafe {
+                let thread = OpenThread(THREAD_QUERY_INFORMATION, 0, tid);
+                if thread.is_null() {
+                    return None;
+                }
+                let zero = windows_sys::Win32::Foundation::FILETIME {
+                    dwLowDateTime: 0,
+                    dwHighDateTime: 0,
+                };
+                let mut times = [zero; 4];
+                let ok = GetThreadTimes(
+                    thread,
+                    &mut times[0],
+                    &mut times[1],
+                    &mut times[2],
+                    &mut times[3],
+                );
+                CloseHandle(thread);
+                if ok == 0 {
+                    return None;
+                }
+                let as_u64 = |t: windows_sys::Win32::Foundation::FILETIME| {
+                    ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64
+                };
+                Some(as_u64(times[2]) + as_u64(times[3]))
+            }
+        }
+
+        #[repr(C, align(16))]
+        struct AlignedContext(CONTEXT);
+
+        struct Module {
+            name: String,
+            base: u64,
+            size: u32,
+            pdb: String,
+            /// `<GUID><age>` as the Microsoft symbol server keys it.
+            key: String,
+        }
+
+        struct Target {
+            process: HANDLE,
+            thread: HANDLE,
+            symbols: HashMap<u64, String>,
+            modules: Vec<Module>,
+        }
+
+        impl Target {
+            fn open(pid: u32, tid: u32) -> Option<Self> {
+                unsafe {
+                    let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+                    if process.is_null() {
+                        return None;
+                    }
+                    let thread = OpenThread(
+                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                        0,
+                        tid,
+                    );
+                    if thread.is_null() {
+                        CloseHandle(process);
+                        return None;
+                    }
+                    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_NO_PROMPTS);
+                    if SymInitializeW(process, std::ptr::null(), 1) == 0 {
+                        CloseHandle(thread);
+                        CloseHandle(process);
+                        return None;
+                    }
+                    Some(Self {
+                        process,
+                        thread,
+                        symbols: HashMap::new(),
+                        modules: Vec::new(),
+                    })
+                }
+            }
+
+            /// One stack, leaf first. `None` when the thread cannot be
+            /// suspended any more (it exited).
+            fn sample(&self) -> Option<Vec<u64>> {
+                unsafe {
+                    if SuspendThread(self.thread) == u32::MAX {
+                        return None;
+                    }
+                    let mut context = AlignedContext(std::mem::zeroed());
+                    context.0.ContextFlags = CONTEXT_CONTROL_AMD64 | CONTEXT_INTEGER_AMD64;
+                    let mut stack = Vec::with_capacity(MAX_FRAMES);
+                    if GetThreadContext(self.thread, &mut context.0) != 0 {
+                        let mut frame: STACKFRAME64 = std::mem::zeroed();
+                        frame.AddrPC.Offset = context.0.Rip;
+                        frame.AddrPC.Mode = AddrModeFlat;
+                        frame.AddrFrame.Offset = context.0.Rbp;
+                        frame.AddrFrame.Mode = AddrModeFlat;
+                        frame.AddrStack.Offset = context.0.Rsp;
+                        frame.AddrStack.Mode = AddrModeFlat;
+                        while stack.len() < MAX_FRAMES {
+                            let ok = StackWalk64(
+                                IMAGE_FILE_MACHINE_AMD64,
+                                self.process,
+                                self.thread,
+                                &mut frame,
+                                (&mut context.0 as *mut CONTEXT).cast(),
+                                None,
+                                Some(SymFunctionTableAccess64),
+                                Some(SymGetModuleBase64),
+                                None,
+                            );
+                            if ok == 0 || frame.AddrPC.Offset == 0 {
+                                break;
+                            }
+                            stack.push(frame.AddrPC.Offset);
+                        }
+                    }
+                    ResumeThread(self.thread);
+                    (!stack.is_empty()).then_some(stack)
+                }
+            }
+
+            fn symbolize(&mut self, pc: u64) -> String {
+                if let Some(name) = self.symbols.get(&pc) {
+                    return name.clone();
+                }
+                let name = unsafe { self.symbolize_uncached(pc) };
+                self.symbols.insert(pc, name.clone());
+                name
+            }
+
+            unsafe fn symbolize_uncached(&mut self, pc: u64) -> String {
+                unsafe {
+                    let mut module: IMAGEHLP_MODULEW64 = std::mem::zeroed();
+                    module.SizeOfStruct = std::mem::size_of::<IMAGEHLP_MODULEW64>() as u32;
+                    let module_name = if SymGetModuleInfoW64(self.process, pc, &mut module) != 0 {
+                        self.remember_module(&module);
+                        super::cpu::wide_str(&module.ModuleName)
+                    } else {
+                        String::new()
+                    };
+                    let mut buffer =
+                        vec![0u64; (std::mem::size_of::<SYMBOL_INFOW>() + MAX_NAME * 2) / 8 + 1];
+                    let symbol = buffer.as_mut_ptr() as *mut SYMBOL_INFOW;
+                    (*symbol).SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;
+                    (*symbol).MaxNameLen = MAX_NAME as u32;
+                    let mut displacement = 0u64;
+                    if SymFromAddrW(self.process, pc, &mut displacement, symbol) != 0
+                        && (*symbol).NameLen > 0
+                    {
+                        let len = ((*symbol).NameLen as usize).min(MAX_NAME);
+                        let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+                            (*symbol).Name.as_ptr(),
+                            len,
+                        ));
+                        if module_name.is_empty() {
+                            name
+                        } else {
+                            format!("{name} [{module_name}]")
+                        }
+                    } else if module.BaseOfImage != 0 {
+                        format!("{module_name}+0x{:x}", pc - module.BaseOfImage)
+                    } else {
+                        format!("0x{pc:x}")
+                    }
+                }
+            }
+
+            fn remember_module(&mut self, module: &IMAGEHLP_MODULEW64) {
+                if self.modules.iter().any(|m| m.base == module.BaseOfImage) {
+                    return;
+                }
+                let guid = module.PdbSig70;
+                let key = format!(
+                    "{:08X}{:04X}{:04X}{}{:X}",
+                    guid.data1,
+                    guid.data2,
+                    guid.data3,
+                    guid.data4.iter().map(|b| format!("{b:02X}")).collect::<String>(),
+                    module.PdbAge
+                );
+                let pdb = super::cpu::wide_str(&module.CVData);
+                let pdb = pdb.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+                self.modules.push(Module {
+                    name: super::cpu::wide_str(&module.ModuleName),
+                    base: module.BaseOfImage,
+                    size: module.ImageSize,
+                    pdb,
+                    key,
+                });
+            }
+
+            fn modules_json(&self) -> String {
+                let modules: Vec<serde_json::Value> = self
+                    .modules
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "name": m.name,
+                            "base": format!("0x{:x}", m.base),
+                            "size": m.size,
+                            "pdb": m.pdb,
+                            "key": m.key,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "modules": modules }).to_string()
+            }
+        }
+
+        impl Drop for Target {
+            fn drop(&mut self) {
+                unsafe {
+                    SymCleanup(self.process);
+                    CloseHandle(self.thread);
+                    CloseHandle(self.process);
+                }
+            }
+        }
+    }
+    /// Starts the renderer native-stack sampler (default in profiling
+    /// builds; `--no-webcontent-stacks` skips it).
+    #[cfg(windows)]
+    pub fn spawn_webcontent_sampler(profiler: Profiler) {
+        native_stacks::spawn(profiler);
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     pub fn spawn_webcontent_sampler(_profiler: Profiler) {}
 
     fn chrono_like_stamp() -> String {
