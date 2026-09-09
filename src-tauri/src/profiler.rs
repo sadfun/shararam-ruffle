@@ -1071,7 +1071,7 @@ Total number in stack (recursive counted multiple, when >=5):
             AddrModeFlat, CONTEXT, GetThreadContext, IMAGEHLP_MODULEW64, STACKFRAME64,
             SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_NO_PROMPTS, SYMOPT_UNDNAME, StackWalk64,
             SymCleanup, SymFromAddrW, SymFunctionTableAccess64, SymGetModuleBase64,
-            SymGetModuleInfoW64, SymInitializeW, SymSetOptions,
+            SymGetModuleInfoW64, SymInitializeW, SymPdb, SymSetOptions,
         };
         use windows_sys::Win32::System::Threading::{
             GetThreadTimes, OpenProcess, OpenThread, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
@@ -1088,6 +1088,14 @@ Total number in stack (recursive counted multiple, when >=5):
         const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
         const CONTEXT_CONTROL_AMD64: u32 = 0x0010_0001;
         const CONTEXT_INTEGER_AMD64: u32 = 0x0010_0002;
+        /// Stack marker for a frame outside every module: JIT code (V8, wasm)
+        /// has no unwind tables, so the walk stops there.
+        const JIT_FRAME: u64 = u64::MAX;
+        /// Without a PDB dbghelp names an address after the nearest *export*,
+        /// which in a 300 MB msedge.dll is usually a function far away; keep
+        /// such names only when the address sits right at the export (syscall
+        /// stubs, small system functions), otherwise report `module+0xrva`.
+        const MAX_EXPORT_DISPLACEMENT: u64 = 256;
 
         pub fn spawn(profiler: Profiler) {
             let _ = std::thread::Builder::new()
@@ -1224,6 +1232,11 @@ Total number in stack (recursive counted multiple, when >=5):
             name: String,
             base: u64,
             size: u32,
+            /// PE TimeDateStamp: with `size` it keys the image itself on the
+            /// symbol server (`<name>/<timestamp><size>/<name>`).
+            timestamp: u32,
+            /// File name of the image (`msedge.dll`), as the symbol server keys it.
+            image: String,
             pdb: String,
             /// `<GUID><age>` as the Microsoft symbol server keys it.
             key: String,
@@ -1300,7 +1313,12 @@ Total number in stack (recursive counted multiple, when >=5):
                             if ok == 0 || frame.AddrPC.Offset == 0 {
                                 break;
                             }
-                            stack.push(frame.AddrPC.Offset);
+                            let pc = frame.AddrPC.Offset;
+                            if SymGetModuleBase64(self.process, pc) == 0 {
+                                stack.push(JIT_FRAME);
+                                break;
+                            }
+                            stack.push(pc);
                         }
                     }
                     ResumeThread(self.thread);
@@ -1309,6 +1327,9 @@ Total number in stack (recursive counted multiple, when >=5):
             }
 
             fn symbolize(&mut self, pc: u64) -> String {
+                if pc == JIT_FRAME {
+                    return "<jit>".to_string();
+                }
                 if let Some(name) = self.symbols.get(&pc) {
                     return name.clone();
                 }
@@ -1319,6 +1340,16 @@ Total number in stack (recursive counted multiple, when >=5):
 
             unsafe fn symbolize_uncached(&mut self, pc: u64) -> String {
                 unsafe {
+                    let mut buffer =
+                        vec![0u64; (std::mem::size_of::<SYMBOL_INFOW>() + MAX_NAME * 2) / 8 + 1];
+                    let symbol = buffer.as_mut_ptr() as *mut SYMBOL_INFOW;
+                    (*symbol).SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;
+                    (*symbol).MaxNameLen = MAX_NAME as u32;
+                    let mut displacement = 0u64;
+                    let named = SymFromAddrW(self.process, pc, &mut displacement, symbol) != 0
+                        && (*symbol).NameLen > 0;
+                    // After SymFromAddrW: deferred symbol loading has run, so
+                    // SymType tells PDB symbols from export tables.
                     let mut module: IMAGEHLP_MODULEW64 = std::mem::zeroed();
                     module.SizeOfStruct = std::mem::size_of::<IMAGEHLP_MODULEW64>() as u32;
                     let module_name = if SymGetModuleInfoW64(self.process, pc, &mut module) != 0 {
@@ -1327,14 +1358,7 @@ Total number in stack (recursive counted multiple, when >=5):
                     } else {
                         String::new()
                     };
-                    let mut buffer =
-                        vec![0u64; (std::mem::size_of::<SYMBOL_INFOW>() + MAX_NAME * 2) / 8 + 1];
-                    let symbol = buffer.as_mut_ptr() as *mut SYMBOL_INFOW;
-                    (*symbol).SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;
-                    (*symbol).MaxNameLen = MAX_NAME as u32;
-                    let mut displacement = 0u64;
-                    if SymFromAddrW(self.process, pc, &mut displacement, symbol) != 0
-                        && (*symbol).NameLen > 0
+                    if named && (module.SymType == SymPdb || displacement < MAX_EXPORT_DISPLACEMENT)
                     {
                         let len = ((*symbol).NameLen as usize).min(MAX_NAME);
                         let name = String::from_utf16_lossy(std::slice::from_raw_parts(
@@ -1373,6 +1397,12 @@ Total number in stack (recursive counted multiple, when >=5):
                     name: super::cpu::wide_str(&module.ModuleName),
                     base: module.BaseOfImage,
                     size: module.ImageSize,
+                    timestamp: module.TimeDateStamp,
+                    image: super::cpu::wide_str(&module.ImageName)
+                        .rsplit(['\\', '/'])
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
                     pdb,
                     key,
                 });
@@ -1387,6 +1417,8 @@ Total number in stack (recursive counted multiple, when >=5):
                             "name": m.name,
                             "base": format!("0x{:x}", m.base),
                             "size": m.size,
+                            "timestamp": m.timestamp,
+                            "image": m.image,
                             "pdb": m.pdb,
                             "key": m.key,
                         })

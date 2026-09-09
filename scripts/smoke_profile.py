@@ -8,6 +8,9 @@ import sys
 
 import duckdb
 
+# Windows consoles default to a legacy code page; the stacks contain arrows.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 path = sys.argv[1]
 db = duckdb.connect(path, read_only=True)
 print("meta:")
