@@ -5,7 +5,7 @@
 (ветка `shararam/perf`) и вшивается в клиент бандлом `web/ruffle/`
 (см. `web/ruffle/BUILD-INFO.md`, там же — как пересобрать).
 
-## Что в проде (релиз v0.2.0)
+## Что в проде (релиз v0.3.0)
 
 Подробный технический отчёт по каждому изменению — механика, доказательство
 корректности, ссылки на коммиты — в [RUFFLE-FORK.md](RUFFLE-FORK.md).
@@ -21,10 +21,15 @@
 | Бленд-группы рендерятся в offscreen-цель размером с bounds группы, а не с весь кадр; `Command::Blend` теперь несёт device-bounds | `4174e3a3c` | `core/src/display_object.rs`, `render/wgpu/src/surface.rs`, `surface/commands.rs` (`blend_region`), `surface/target.rs` (origin цели), `render/wgpu/shaders/blend/*.wgsl` | домик со столом-самоваром (25 multiply-блендов): 7.6 → 17 fps, ожидание GPU 144 → 53 мс |
 | `MULTIPLY` на непрозрачном кадре — через GPU blend state (`Dst, OneMinusSrcAlpha`), без снимка бэкдропа и разрыва render pass; точно равен шейдеру при dst.a = 1 | `1406709b8` | `render/wgpu/src/blend.rs` (`TrivialBlend::Multiply`), `surface/commands.rs` (флаг `opaque`, гаснет на Alpha/Erase/Shader/Stage3D) | тот же домик: 17 → 32–41 fps, GPU 28–31 мс — как в комнатах без блендов |
 | Кэш распарсенных SWF: повторный AVM1 `loadMovie` того же URL берёт готовый `Arc<SwfMovie>` и его библиотеку персонажей; preload повтора обрабатывает только теги кадров/меток/init-actions | `971dd6c0d` | `core/src/library.rs` (`movie_cache`, `MovieLibrary::preloaded`), `core/src/loader.rs` (`movie_loader_data`), `core/src/display_object/movie_clip.rs` (`preload`) | в сессии 133 с: 394 загрузки / 198 URL, 79% времени preload были повторами (риг аватара 12 × 140 мс); после — 94% повторов из кэша, ~0 мс каждый |
+| Библиотека загруженного фильма (персонажи, меши рендера, битмапы, шрифты, распакованные байты SWF) освобождается, когда её не играет ни один корневой клип; в апстриме — никогда | `be239a95c` | `core/src/library.rs` (`use_movie`, `prune_unused_movies`), `core/src/display_object/movie_clip.rs` (`library_use`), `core/src/player.rs` | куча gc-arena после сборки мусора росла на 250 МБ за 5 минут и не возвращалась ни на одном выходе из локации |
+| Wasm-память растёт кусками по 64 МиБ вместо 64 КиБ dlmalloc: на Windows/Chromium каждый `memory.grow` коммитит память через `VirtualAlloc` за 1–10 мс | `876466068` | `web/src/alloc.rs`, `web/src/lib.rs` | фризы 0.8–5.5 с при выходе из людной локации на Windows; в профиле новой сборки секундных фризов нет, максимум 511 мс |
+| Хит-тест мыши не обходит весь display list (кэш bounds поддерева, включая hit-области кнопок), а диспатч AVM1-событий не ищет `onXxx` по цепочке прототипов у каждого клипа (кэш наличия обработчика) | `7826b1412` | `core/src/display_object.rs` (`pick_bounds`), `core/src/avm1/handlers.rs`, `core/src/display_object/movie_clip.rs`, `core/src/player.rs` | синтетика 4900 объектов: pick 705 → 1.2 мкс, событие мыши 1200 → 75 мкс; у тестировщицы −15 мс из 38-миллисекундного тика |
 
-Корректность: 155 image-тестов Ruffle (`blend`, `mask`, `filter`, `cache`) и 142 теста
-загрузчика (`load`, `mcl_`, `movieclip_lockroot`) зелёные на `shararam/perf`;
-запуск — `cargo test -p tests --features imgtests --release --test tests -- <filter>`.
+Корректность: весь набор SWF-тестов Ruffle на `shararam/perf` — 4166 зелёных, 4 падения
+те же, что и на нетронутом апстримном срезе; хит-тест дополнительно прогнан с фичей
+`ruffle_core/pick_bounds_verify`, которая пересчитывает кэшированные bounds при каждом
+обращении. Запуск — `cargo test -p tests --release --test tests`, image-тесты —
+`--features imgtests`.
 
 Плюс на стороне клиента/сервера (уже в `main` до v0.2.0): дисковый кэш `/fs/`-ассетов
 (`4eb75e1`, `dfeae7a`), предсжатая статика для Caddy (`8e2d188`), кэширование сервера (`2b36643`).
@@ -69,8 +74,16 @@
 - Оставшиеся шейдерные бленды (overlay/darken и т. п.) всё ещё рвут render pass —
   следующий шаг: рисовать квад бленда внутри следующего Draw-чанка.
 - Снятие фильтров с SWF на лету (ветка `swf-patch`) — невыгодно, выключено.
-- Аллокации `$.Fn/FnA` (`arguments.concat` на каждый вызов делегата) и стойлы главного
-  потока 40–60 мс в людных комнатах — CPU-сторона, не рендер.
+- Стойлы главного потока в людных комнатах были на две трети хит-тестом мыши и
+  диспатчем событий — это закрыто в v0.3.0 (п.7 отчёта). Осталась AS2-сторона:
+  аллокации `$.Fn/FnA` (`arguments.concat` на каждый вызов делегата) и квадратичный
+  `Dispose` при выходе из локации.
+- `Array.sort` в Ruffle — квиксорт с левым пивотом «как во Flash», то есть O(n²) на уже
+  отсортированном массиве. `LayersController` сортирует свой список каждые 50 мс, и он
+  каждый раз уже отсортирован: при 56 объектах это 1540 вызовов AS2-компаратора вместо
+  ~330, 3–4 мс на сортировку. Лечится средним пивотом в `core/src/avm1/globals/array.rs`
+  (порядок равных элементов перестанет совпадать с Flash) или интервалом на стороне
+  сервера Шарарама.
 
 ## Как выпускать
 
