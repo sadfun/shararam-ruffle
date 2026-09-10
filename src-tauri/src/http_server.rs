@@ -791,7 +791,10 @@ where
 /// from one download instead of one request each.
 fn pin_asset_cache(path: &str, headers: &mut HeaderMap) {
     if path.starts_with("fs/") {
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(IMMUTABLE_CACHE));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(IMMUTABLE_CACHE),
+        );
     }
 }
 
