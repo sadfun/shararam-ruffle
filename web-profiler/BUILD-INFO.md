@@ -6,18 +6,23 @@ never include this directory.
 
 - source: <https://github.com/sadfun/ruffle>
 - branch: `shararam/render-opt` (on top of `shararam/rtmp-netconnection`)
-- revision: `e0d829d21` (grows wasm memory in 64 MiB chunks instead of dlmalloc's
-  64 KiB — on Windows/Chromium every `memory.grow` costs 1–10 ms in the
-  kernel, so a tick needing 30 MB of fresh heap froze for seconds; on top of
-  `4a67bd03e`: frees the library of a loaded movie once no root
-  clip plays it — upstream keeps every `loadMovie`'s characters, renderer
-  meshes, bitmaps, fonts and SWF bytes for the life of the player, which is
-  why the post-GC heap only ever grew; on top of `24e5f275d`: parsed-movie
-  cache — AVM1 loadMovie of an already preloaded URL shares the movie and
-  its library; multiply composited with a blend state on the opaque frame;
-  blend groups rendered into bounds-sized offscreen targets; plus the AVM1
-  stack sampler with position labels for anonymous functions, allocation
-  counters, screen command grid, Array.sort span — see
+- revision: `deb3ce384` (кэш bounds для хит-теста мыши и наличия
+  AVM1-обработчиков: `mouse_pick` больше не обходит весь display list, а
+  диспатч `onEnterFrame`/`onMouseMove`/… не ищет метод по цепочке прототипов
+  у каждого клипа — в людной комнате pick 705 → 3 мкс, событие мыши
+  1200 → 75 мкс на синтетике из 4900 объектов; на тестовом наборе SWF
+  Ruffle 4165 зелёных, 5 падений те же, что и без изменения; на верхних
+  коммитах: `e0d829d21` — рост памяти wasm кусками по 64 МиБ вместо 64 КиБ
+  dlmalloc (на Windows/Chromium каждый `memory.grow` стоит 1–10 мс в ядре,
+  и тик, которому нужно 30 МБ свежей кучи, замирал на секунды);
+  `4a67bd03e` — библиотека загруженного фильма освобождается, когда её
+  не играет ни один корневой клип (апстрим держит персонажей, меши, битмапы,
+  шрифты и байты SWF каждого `loadMovie` до конца сессии, отчего куча после
+  сборки мусора только росла); `24e5f275d` — кэш распарсенных SWF: повторный
+  AVM1 loadMovie того же URL делит фильм и библиотеку; MULTIPLY на
+  непрозрачном кадре через blend state; бленд-группы в offscreen-цели размером
+  с объект; плюс сэмплер стека AVM1 с позиционными метками анонимных функций,
+  счётчики аллокаций, карта экрана, span `Array.sort` — см.
   `docs/SHARARAM-PROFILER.md`)
 - build: `cd web && npm run build:shararam-profiler`
   (release profile + wasm-opt, identical to a regular build except for the
