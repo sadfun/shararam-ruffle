@@ -42,7 +42,7 @@ export class AllocationsPanel {
     const container = this.container;
     container.textContent = "";
     const hasCounters = this.data.counters.has("avm1_objects");
-    const hasGc = this.data.gcHeapMaxMb > 0;
+    const hasGc = this.data.gcHeapMaxMb > 0 || this.data.gcObjectsMax > 0;
     if (!hasCounters && !hasGc) {
       container.appendChild(
         el(
@@ -106,7 +106,15 @@ export class AllocationsPanel {
     memory.appendChild(el("div", "info-title", "Память за диапазон"));
     const memTable = el("table", "grid") as HTMLTableElement;
     const memBody = memTable.createTBody();
-    const addMemRow = (label: string, series: Float64Array, maxMb: number) => {
+    const bytesOfMb = (mb: number) => formatBytes(mb * 1048576);
+    const count = (v: number) => Math.round(v).toLocaleString("ru-RU");
+    const addMemRow = (
+      label: string,
+      series: Float64Array,
+      max: number,
+      fmt: (v: number) => string,
+      warnDelta: number
+    ) => {
       const first = series[selection.a];
       const last = series[selection.b];
       if (Number.isNaN(first) && Number.isNaN(last)) return;
@@ -119,18 +127,21 @@ export class AllocationsPanel {
       const value = tr.insertCell();
       value.className = "num";
       const delta = last - first;
-      const fmt = (mb: number) => (Number.isNaN(mb) ? "—" : formatBytes(mb * 1048576));
-      value.textContent = `${fmt(first)} → ${fmt(last)}`;
+      const fmtOrDash = (v: number) => (Number.isNaN(v) ? "—" : fmt(v));
+      value.textContent = `${fmtOrDash(first)} → ${fmtOrDash(last)}`;
       const deltaCell = tr.insertCell();
       deltaCell.className = "num";
-      deltaCell.textContent = Number.isNaN(delta) ? "" : `${delta >= 0 ? "+" : ""}${formatBytes(delta * 1048576)}`;
-      if (!Number.isNaN(delta)) deltaCell.style.color = delta > 1 ? "#de795a" : "#84aa63";
+      deltaCell.textContent = Number.isNaN(delta) ? "" : `${delta >= 0 ? "+" : ""}${fmt(delta)}`;
+      if (!Number.isNaN(delta)) deltaCell.style.color = delta > warnDelta ? "#de795a" : "#84aa63";
       const peakCell = tr.insertCell();
       peakCell.className = "num dim";
-      peakCell.textContent = `пик ${formatBytes(peak * 1048576)} (сессия ${formatBytes(maxMb * 1048576)})`;
+      peakCell.textContent = `пик ${fmt(peak)} (сессия ${fmt(max)})`;
     };
-    if (hasGc) addMemRow("Куча gc-arena", this.data.gcHeapMb, this.data.gcHeapMaxMb);
-    addMemRow("Память wasm", this.data.memoryMb, this.data.memoryMaxMb);
+    if (this.data.gcHeapMaxMb > 0)
+      addMemRow("Куча gc-arena", this.data.gcHeapMb, this.data.gcHeapMaxMb, bytesOfMb, 1);
+    if (this.data.gcObjectsMax > 0)
+      addMemRow("Объекты gc-arena", this.data.gcObjects, this.data.gcObjectsMax, count, 1000);
+    addMemRow("Память wasm", this.data.memoryMb, this.data.memoryMaxMb, bytesOfMb, 1);
     memory.appendChild(memTable);
     container.appendChild(memory);
 

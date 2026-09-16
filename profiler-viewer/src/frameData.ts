@@ -58,6 +58,10 @@ export interface FrameData {
   /** per frame: gc-arena heap MB carried forward (NaN if not recorded) */
   gcHeapMb: Float64Array;
   gcHeapMaxMb: number;
+  /** per frame: live gc-arena objects (gc_objects gauge, carried forward);
+   *  NaN when not recorded — Ruffle ≥ 0.6 counts objects, not bytes */
+  gcObjects: Float64Array;
+  gcObjectsMax: number;
   /** per frame: process CPU % carried forward, by process key
    *  (client / webcontent / gpu; empty map when the host didn't sample) */
   cpu: Map<string, Float64Array>;
@@ -305,6 +309,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
   // ---- per-frame counters + gc heap from the ruffle render event ---------
   const gcHeapMb = new Float64Array(n).fill(NaN);
   let gcHeapMaxMb = 0;
+  const gcObjects = new Float64Array(n).fill(NaN);
+  let gcObjectsMax = 0;
   const counters = new Map<string, Float64Array>();
   try {
     const { rows } = await query(
@@ -328,17 +334,27 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
           gcHeapMb[f] = value / 1048576;
           continue;
         }
+        if (key === "gc_objects") {
+          gcObjects[f] = value;
+          continue;
+        }
         let series = counters.get(key);
         if (!series) counters.set(key, (series = new Float64Array(n)));
         series[f] += value;
       }
     }
-    // carry the gc heap gauge forward through frames without a ruffle render
+    // carry the gc gauges forward through frames without a ruffle render
     let current = NaN;
     for (let f = 0; f < n; f++) {
       if (!Number.isNaN(gcHeapMb[f])) current = gcHeapMb[f];
       else gcHeapMb[f] = current;
       if (!Number.isNaN(current) && current > gcHeapMaxMb) gcHeapMaxMb = current;
+    }
+    current = NaN;
+    for (let f = 0; f < n; f++) {
+      if (!Number.isNaN(gcObjects[f])) current = gcObjects[f];
+      else gcObjects[f] = current;
+      if (!Number.isNaN(current) && current > gcObjectsMax) gcObjectsMax = current;
     }
   } catch {
     /* profile without args */
@@ -500,6 +516,8 @@ export async function buildFrameData(model: ProfileModel): Promise<FrameData> {
     memoryMaxMb,
     gcHeapMb,
     gcHeapMaxMb,
+    gcObjects,
+    gcObjectsMax,
     cpu,
     cpuMax,
     frameTailMs,

@@ -197,6 +197,8 @@ export class FrameTimeline {
     }
     if (!Number.isNaN(this.data.gcHeapMb[index]))
       parts.push(`куча gc ${this.data.gcHeapMb[index].toFixed(1)} МБ`);
+    if (!Number.isNaN(this.data.gcObjects[index]))
+      parts.push(`объектов gc ${Math.round(this.data.gcObjects[index]).toLocaleString("ru-RU")}`);
     const objects = this.data.counters.get("avm1_objects");
     if (objects && objects[index] > 0) parts.push(`аллокаций AVM1 ${objects[index]}`);
     if (this.data.cpu.size) {
