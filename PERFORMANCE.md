@@ -5,28 +5,28 @@
 (ветка `shararam/perf`) и вшивается в клиент бандлом `web/ruffle/`
 (см. `web/ruffle/BUILD-INFO.md`, там же — как пересобрать).
 
-## Что в проде (релиз v0.3.0)
-
-Подробный технический отчёт по каждому изменению — механика, доказательство
-корректности, ссылки на коммиты — в [RUFFLE-FORK.md](RUFFLE-FORK.md).
-
+## Что в проде (релиз v0.4.0)
 
 Подробный отчёт по каждому отличию форка от апстрима — механика, аргумент
 корректности, ссылки на коммиты — в [RUFFLE-FORK.md](RUFFLE-FORK.md).
 
+С v0.4.0 форк стоит на Ruffle v0.6.0 (до этого — августовский срез апстрима), хэши
+коммитов в таблице новые; прежние сохранены тегами `archive/*-on-0.5.0`.
 
 | Оптимизация | Коммит форка | Файлы | Эффект (измерено) |
 |---|---|---|---|
-| Инлайн `BlendMode.LAYER`: группа без зависимости от фона рисуется прямо в кадр, а не через полноэкранную offscreen-поверхность (пиксельно эквивалентно по ассоциативности «over») | `bb27d1c08` | `render/src/commands.rs` (`is_backdrop_independent`), `core/src/display_object.rs` (`render_base`) | людная локация 9.2 → 28.7 fps. Выключатель: конфиг `layerBlendInlining` ← env сервера `SHARARAM_LAYER_INLINE=0` |
-| Бленд-группы рендерятся в offscreen-цель размером с bounds группы, а не с весь кадр; `Command::Blend` теперь несёт device-bounds | `4174e3a3c` | `core/src/display_object.rs`, `render/wgpu/src/surface.rs`, `surface/commands.rs` (`blend_region`), `surface/target.rs` (origin цели), `render/wgpu/shaders/blend/*.wgsl` | домик со столом-самоваром (25 multiply-блендов): 7.6 → 17 fps, ожидание GPU 144 → 53 мс |
-| `MULTIPLY` на непрозрачном кадре — через GPU blend state (`Dst, OneMinusSrcAlpha`), без снимка бэкдропа и разрыва render pass; точно равен шейдеру при dst.a = 1 | `1406709b8` | `render/wgpu/src/blend.rs` (`TrivialBlend::Multiply`), `surface/commands.rs` (флаг `opaque`, гаснет на Alpha/Erase/Shader/Stage3D) | тот же домик: 17 → 32–41 fps, GPU 28–31 мс — как в комнатах без блендов |
-| Кэш распарсенных SWF: повторный AVM1 `loadMovie` того же URL берёт готовый `Arc<SwfMovie>` и его библиотеку персонажей; preload повтора обрабатывает только теги кадров/меток/init-actions | `971dd6c0d` | `core/src/library.rs` (`movie_cache`, `MovieLibrary::preloaded`), `core/src/loader.rs` (`movie_loader_data`), `core/src/display_object/movie_clip.rs` (`preload`) | в сессии 133 с: 394 загрузки / 198 URL, 79% времени preload были повторами (риг аватара 12 × 140 мс); после — 94% повторов из кэша, ~0 мс каждый |
-| Библиотека загруженного фильма (персонажи, меши рендера, битмапы, шрифты, распакованные байты SWF) освобождается, когда её не играет ни один корневой клип; в апстриме — никогда | `be239a95c` | `core/src/library.rs` (`use_movie`, `prune_unused_movies`), `core/src/display_object/movie_clip.rs` (`library_use`), `core/src/player.rs` | куча gc-arena после сборки мусора росла на 250 МБ за 5 минут и не возвращалась ни на одном выходе из локации |
-| Wasm-память растёт кусками по 64 МиБ вместо 64 КиБ dlmalloc: на Windows/Chromium каждый `memory.grow` коммитит память через `VirtualAlloc` за 1–10 мс | `876466068` | `web/src/alloc.rs`, `web/src/lib.rs` | фризы 0.8–5.5 с при выходе из людной локации на Windows; в профиле новой сборки секундных фризов нет, максимум 511 мс |
-| Хит-тест мыши не обходит весь display list (кэш bounds поддерева, включая hit-области кнопок), а диспатч AVM1-событий не ищет `onXxx` по цепочке прототипов у каждого клипа (кэш наличия обработчика) | `7826b1412` | `core/src/display_object.rs` (`pick_bounds`), `core/src/avm1/handlers.rs`, `core/src/display_object/movie_clip.rs`, `core/src/player.rs` | синтетика 4900 объектов: pick 705 → 1.2 мкс, событие мыши 1200 → 75 мкс; у тестировщицы −15 мс из 38-миллисекундного тика |
+| Инлайн `BlendMode.LAYER`: группа без зависимости от фона рисуется прямо в кадр, а не через полноэкранную offscreen-поверхность (пиксельно эквивалентно по ассоциативности «over») | `868d94e4a` | `render/src/commands.rs` (`is_backdrop_independent`), `core/src/display_object.rs` (`render_base`) | людная локация 9.2 → 28.7 fps. Выключатель: конфиг `layerBlendInlining` ← env сервера `SHARARAM_LAYER_INLINE=0` |
+| Бленд-группы рендерятся в offscreen-цель размером с bounds группы, а не с весь кадр; `Command::Blend` теперь несёт device-bounds | `8a43b6a72` | `core/src/display_object.rs`, `render/wgpu/src/surface.rs`, `surface/commands.rs` (`blend_region`), `surface/target.rs` (origin цели), `render/wgpu/shaders/blend/*.wgsl` | домик со столом-самоваром (25 multiply-блендов): 7.6 → 17 fps, ожидание GPU 144 → 53 мс |
+| `MULTIPLY` на непрозрачном кадре — через GPU blend state (`Dst, OneMinusSrcAlpha`), без снимка бэкдропа и разрыва render pass; точно равен шейдеру при dst.a = 1 | `716149782` | `render/wgpu/src/blend.rs` (`TrivialBlend::Multiply`), `surface/commands.rs` (флаг `opaque`, гаснет на Alpha/Erase/Shader/Stage3D) | тот же домик: 17 → 32–41 fps, GPU 28–31 мс — как в комнатах без блендов |
+| Кэш распарсенных SWF: повторный AVM1 `loadMovie` того же URL берёт готовый `Arc<SwfMovie>` и его библиотеку персонажей; preload повтора обрабатывает только теги кадров/меток/init-actions | `c36b63058` | `core/src/library.rs` (`movie_cache`, `MovieLibrary::preloaded`), `core/src/loader.rs` (`movie_loader_data`), `core/src/display_object/movie_clip.rs` (`preload`) | в сессии 133 с: 394 загрузки / 198 URL, 79% времени preload были повторами (риг аватара 12 × 140 мс); после — 94% повторов из кэша, ~0 мс каждый |
+| Библиотека загруженного фильма (персонажи, меши рендера, битмапы, шрифты, распакованные байты SWF) освобождается, когда её не играет ни один корневой клип; в апстриме — никогда | `f4632115e` | `core/src/library.rs` (`use_movie`, `prune_unused_movies`), `core/src/display_object/movie_clip.rs` (`library_use`), `core/src/player.rs` | куча gc-arena после сборки мусора росла на 250 МБ за 5 минут и не возвращалась ни на одном выходе из локации |
+| Wasm-память растёт кусками по 64 МиБ вместо 64 КиБ dlmalloc: на Windows/Chromium каждый `memory.grow` коммитит память через `VirtualAlloc` за 1–10 мс | `bd3a2da5e` | `web/src/alloc.rs`, `web/src/lib.rs` | фризы 0.8–5.5 с при выходе из людной локации на Windows; в профиле новой сборки секундных фризов нет, максимум 511 мс |
+| Хит-тест мыши не обходит весь display list (кэш bounds поддерева, включая hit-области кнопок), а диспатч AVM1-событий не ищет `onXxx` по цепочке прототипов у каждого клипа (кэш наличия обработчика) | `a05f9a100` | `core/src/display_object.rs` (`pick_bounds`), `core/src/avm1/handlers.rs`, `core/src/display_object/movie_clip.rs`, `core/src/player.rs` | синтетика 4900 объектов: pick 705 → 1.2 мкс, событие мыши 1200 → 75 мкс; у тестировщицы −15 мс из 38-миллисекундного тика |
+| AVM1 `MovieClip.forceSmoothing` (в апстриме не реализовано): флаг клипа сглаживает загруженную в него картинку и битмап-заливки шейпов, лежащих прямо в нём; поведение снято с настоящего Flash Player 23 | `ea4c4c019`, `a4aa03b64` | `core/src/avm1/globals/movie_clip.rs`, `core/src/display_object.rs` (`FORCE_SMOOTHING`), `core/src/display_object/graphic.rs` (`GraphicShared::smoothed`) | не про скорость: аватарки друзей из VK и иконки с битмапами перестают быть пиксельными при масштабировании |
 
-Корректность: весь набор SWF-тестов Ruffle на `shararam/perf` — 4166 зелёных, 4 падения
-те же, что и на нетронутом апстримном срезе; хит-тест дополнительно прогнан с фичей
+Корректность: весь набор SWF-тестов Ruffle на `shararam/perf` — 4530 зелёных, 8 падений:
+три намеренных (RTMP-коммит шлёт массивы как ECMA) и пять, которые падают и на нетронутом
+v0.6.0; хит-тест дополнительно прогнан с фичей
 `ruffle_core/pick_bounds_verify`, которая пересчитывает кэшированные bounds при каждом
 обращении. Запуск — `cargo test -p tests --release --test tests`, image-тесты —
 `--features imgtests`.

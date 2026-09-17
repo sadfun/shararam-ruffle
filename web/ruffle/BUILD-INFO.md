@@ -3,8 +3,8 @@
 This is the only Ruffle distribution shipped with Shararam Ruffle.
 
 - source: <https://github.com/sadfun/ruffle>
-- branch: `shararam/perf` (on top of `shararam/layer-inline` → `shararam/rtmp-netconnection`)
-- revision: `7826b1412`
+- branch: `shararam/perf` (on top of `shararam/rtmp-netconnection`), based on upstream Ruffle v0.6.0
+- revision: `22f6c2ab5`
 - adds, on top of upstream Ruffle:
   - backdrop-independent `BlendMode.LAYER` groups render inline instead of
     through screen-sized offscreen surfaces (pixel-identical, 9.2 → 28.7 fps
@@ -33,5 +33,11 @@ This is the only Ruffle distribution shipped with Shararam Ruffle.
     under it (button hit areas included, so a subtree without the cursor is
     skipped whole), and a clip caches whether it has each `onXxx` handler
     instead of resolving the name through its prototype chain on every event.
-    In a crowded room that is 15 ms off a 38 ms tick.
-- built with the standard `npm run build` pipeline (includes wasm-opt).
+    In a crowded room that is 15 ms off a 38 ms tick;
+  - AVM1 `MovieClip.forceSmoothing`, which upstream does not implement: while
+    the flag is set, the image loaded into the clip and the bitmap fills of the
+    shapes placed right in it are smoothed. The behaviour was captured from a
+    real Flash Player 23 (the getter always reads `undefined`, any load into
+    the clip clears the flag, child clips, drawings and `attachBitmap` are not
+    affected).
+- built with the standard `npm run build` pipeline (includes wasm-opt), wasm-bindgen-cli 0.2.127.

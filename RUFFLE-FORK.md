@@ -1,29 +1,38 @@
 # Наши изменения в Ruffle: механика, корректность, коммиты
 
 Клиент вшивает сборку форка <https://github.com/sadfun/ruffle>, ветка **`shararam/perf`**,
-ревизия [`7826b1412`](https://github.com/sadfun/ruffle/commit/7826b1412) (см.
-`web/ruffle/BUILD-INFO.md`). Относительно Ruffle, который шёл в v0.1.x
-(`shararam/rtmp-netconnection`, [`b298ed3d1`](https://github.com/sadfun/ruffle/commit/b298ed3d1)
-— апстрим + RTMP), добавлено семь коммитов: четыре про рендер и загрузку, два про
-память и один про процессорное время мыши и событий:
+ревизия [`22f6c2ab5`](https://github.com/sadfun/ruffle/commit/22f6c2ab5) (см.
+`web/ruffle/BUILD-INFO.md`). С v0.4.0 ветка стоит на **Ruffle v0.6.0**: 16.09.2026 она
+перебазирована с августовского среза апстрима, поэтому хэши коммитов ниже новые.
+Прежние головы сохранены тегами `archive/*-on-0.5.0` (например,
+[`archive/perf-on-0.5.0`](https://github.com/sadfun/ruffle/tree/archive/perf-on-0.5.0) =
+`7826b1412`, сборка клиента v0.3.0), так что старые ссылки продолжают открываться.
+
+Относительно апстрима с RTMP (`shararam/rtmp-netconnection`,
+[`48080cbf6`](https://github.com/sadfun/ruffle/commit/48080cbf6)) добавлено восемь
+изменений: четыре про рендер и загрузку, два про память, одно про процессорное время
+мыши и событий и одно про соответствие Flash Player:
 
 | # | Коммит | Что | Эффект |
 |---|---|---|---|
-| 1 | [`bb27d1c08`](https://github.com/sadfun/ruffle/commit/bb27d1c08) | `BlendMode.LAYER`-группы без зависимости от фона рисуются inline | людная комната 9.2 → 28.7 fps |
-| 2 | [`4174e3a3c`](https://github.com/sadfun/ruffle/commit/4174e3a3c) | offscreen-цель бленда — размером с объект, не с кадр | домик 7.6 → 17 fps |
-| 3 | [`1406709b8`](https://github.com/sadfun/ruffle/commit/1406709b8) | `MULTIPLY` на непрозрачном кадре — аппаратным blend state | домик 17 → 32–41 fps |
-| 4 | [`971dd6c0d`](https://github.com/sadfun/ruffle/commit/971dd6c0d) | повторный `loadMovie` того же URL переиспользует распарсенный SWF | 94 % повторов ≈ 0 мс |
-| 5 | [`be239a95c`](https://github.com/sadfun/ruffle/commit/be239a95c) | библиотека выгруженного фильма освобождается (в апстриме — никогда) | куча gc после сборки перестаёт расти на каждую локацию |
-| 6 | [`876466068`](https://github.com/sadfun/ruffle/commit/876466068) | wasm-память растёт кусками по 64 МиБ вместо 64 КиБ dlmalloc | фризы 0.8–5.5 с при смене локации на Windows |
-| 7 | [`7826b1412`](https://github.com/sadfun/ruffle/commit/7826b1412) | хит-тест мыши и диспатч AVM1-событий не обходят весь display list | людная комната: −15 мс из 38-миллисекундного тика |
+| 1 | [`868d94e4a`](https://github.com/sadfun/ruffle/commit/868d94e4a) | `BlendMode.LAYER`-группы без зависимости от фона рисуются inline | людная комната 9.2 → 28.7 fps |
+| 2 | [`8a43b6a72`](https://github.com/sadfun/ruffle/commit/8a43b6a72) | offscreen-цель бленда — размером с объект, не с кадр | домик 7.6 → 17 fps |
+| 3 | [`716149782`](https://github.com/sadfun/ruffle/commit/716149782) | `MULTIPLY` на непрозрачном кадре — аппаратным blend state | домик 17 → 32–41 fps |
+| 4 | [`c36b63058`](https://github.com/sadfun/ruffle/commit/c36b63058) | повторный `loadMovie` того же URL переиспользует распарсенный SWF | 94 % повторов ≈ 0 мс |
+| 5 | [`f4632115e`](https://github.com/sadfun/ruffle/commit/f4632115e) | библиотека выгруженного фильма освобождается (в апстриме — никогда) | куча gc после сборки перестаёт расти на каждую локацию |
+| 6 | [`bd3a2da5e`](https://github.com/sadfun/ruffle/commit/bd3a2da5e) | wasm-память растёт кусками по 64 МиБ вместо 64 КиБ dlmalloc | фризы 0.8–5.5 с при смене локации на Windows |
+| 7 | [`a05f9a100`](https://github.com/sadfun/ruffle/commit/a05f9a100) | хит-тест мыши и диспатч AVM1-событий не обходят весь display list | людная комната: −15 мс из 38-миллисекундного тика |
+| 8 | [`ea4c4c019`](https://github.com/sadfun/ruffle/commit/ea4c4c019), [`a4aa03b64`](https://github.com/sadfun/ruffle/commit/a4aa03b64) | AVM1 `MovieClip.forceSmoothing` (в апстриме не реализовано) | загруженные картинки и битмап-заливки под флагом сглаживаются, как во Flash Player |
 
-Полный дифф: <https://github.com/sadfun/ruffle/compare/b298ed3d1...shararam/perf>
-(38 файлов, +1381/−115). Все семь изменений дают тот же вывод, что и
-апстрим — это проверяется тестами самого Ruffle (см. «Как проверить»).
+Полный дифф: <https://github.com/sadfun/ruffle/compare/48080cbf6...shararam/perf>
+(85 файлов, +2166/−172; больше половины — тесты и их эталоны). Первые семь изменений
+дают тот же вывод, что и апстрим, — это проверяется тестами самого Ruffle (см. «Как
+проверить»). Восьмое меняет вывод намеренно: приводит его к тому, что рисует настоящий
+Flash Player, и сверено с ним.
 
 ---
 
-## 1. Инлайн `BlendMode.LAYER`-групп — [`bb27d1c08`](https://github.com/sadfun/ruffle/commit/bb27d1c08)
+## 1. Инлайн `BlendMode.LAYER`-групп — [`868d94e4a`](https://github.com/sadfun/ruffle/commit/868d94e4a)
 
 ### Как это работает в апстриме
 
@@ -80,7 +89,7 @@ Player (Flash применяет alpha к сплющенной группе, Ruf
 
 ---
 
-## 2. Offscreen-цель бленда размером с объект — [`4174e3a3c`](https://github.com/sadfun/ruffle/commit/4174e3a3c)
+## 2. Offscreen-цель бленда размером с объект — [`8a43b6a72`](https://github.com/sadfun/ruffle/commit/8a43b6a72)
 
 ### Как это работает в апстриме
 
@@ -136,7 +145,7 @@ image-тесты `blend` (32), `mask` (27), `filter` (62), `cache` (34) — бе
 
 ---
 
-## 3. `MULTIPLY` на непрозрачном кадре через blend state — [`1406709b8`](https://github.com/sadfun/ruffle/commit/1406709b8)
+## 3. `MULTIPLY` на непрозрачном кадре через blend state — [`716149782`](https://github.com/sadfun/ruffle/commit/716149782)
 
 ### Как это работает в апстриме
 
@@ -194,7 +203,7 @@ Image-тесты `blend`/`mask`/`filter`/`cache` (155) — эталоны не �
 
 ---
 
-## 4. Кэш распарсенных SWF для повторного `loadMovie` — [`971dd6c0d`](https://github.com/sadfun/ruffle/commit/971dd6c0d)
+## 4. Кэш распарсенных SWF для повторного `loadMovie` — [`c36b63058`](https://github.com/sadfun/ruffle/commit/c36b63058)
 
 ### Как это работает в апстриме
 
@@ -263,7 +272,7 @@ body_holder_mc.<MRId>)`), URL один на всех смешариков в к�
 
 ---
 
-## 5. Освобождение библиотеки выгруженного фильма — [`be239a95c`](https://github.com/sadfun/ruffle/commit/be239a95c)
+## 5. Освобождение библиотеки выгруженного фильма — [`f4632115e`](https://github.com/sadfun/ruffle/commit/f4632115e)
 
 ### Как это работает в апстриме
 
@@ -338,9 +347,17 @@ SWF. `unloadMovie`, `removeMovieClip` и повторный `loadMovie` в то�
 Эффект в игре — по следующему профилю: `gc_min` (куча после сборки в событии `render`)
 должна возвращаться после выхода из локации, а не расти ступеньками.
 
+**Исправление при переносе на v0.6.0.** Тест `from_gnash/misc-ming.all/attachImported`,
+который в v0.3.0 числился «падающим и без нас», на самом деле падал из-за этого
+коммита. Корневой клип `ImportAssets` (`MovieClip::new_import_assets`) временный: его
+создают, прогоняют preload и отпускают. Он заявлял библиотеку импортируемого фильма
+через `use_movie`, после сборки мусора пользователей не оставалось, и библиотека
+освобождалась вместе с импортированными персонажами. Теперь такие клипы библиотеку не
+заявляют, и тест зелёный.
+
 ---
 
-## 6. Рост wasm-памяти кусками по 64 МиБ — [`876466068`](https://github.com/sadfun/ruffle/commit/876466068)
+## 6. Рост wasm-памяти кусками по 64 МиБ — [`bd3a2da5e`](https://github.com/sadfun/ruffle/commit/bd3a2da5e)
 
 ### Как это работает в апстриме
 
@@ -383,7 +400,7 @@ Ruffle в апстриме глобальный аллокатор не пере
 
 ---
 
-## 7. Кэш bounds хит-теста и наличия обработчиков — [`7826b1412`](https://github.com/sadfun/ruffle/commit/7826b1412)
+## 7. Кэш bounds хит-теста и наличия обработчиков — [`a05f9a100`](https://github.com/sadfun/ruffle/commit/a05f9a100)
 
 ### Как это работает в апстриме
 
@@ -466,9 +483,73 @@ objects, глубина 10): тик 38 мс, из них pick 15 мс; собы�
 
 При 50 аватарах (9800 объектов) pick 1427 → 1.6 мкс. Полный набор SWF-тестов Ruffle
 на `shararam/perf` — 4166 зелёных, 4 падения те же, что и без этого коммита
-(три AMF-теста и `attachImported`). В игре у тестировщицы это снимает около 15 мс с
+(три AMF-теста и `attachImported`; последний оказался нашей ошибкой из п.5, исправлен
+при переносе на v0.6.0). В игре у тестировщицы это снимает около 15 мс с
 38-миллисекундного тика в людной комнате: wasm в её WebView2 медленнее нативной
 сборки примерно в 15 раз.
+
+**`MovieClip.hitArea` из v0.6.0.** Апстрим в v0.6.0 реализовал `hitArea`: в режиме кнопки
+клип пикается не по своей форме, а по другому клипу, который может стоять где угодно на
+сцене, то есть вне bounds владельца и всех его предков. Обрезка по `pick_bounds` такого
+владельца пропустила бы. Поэтому у каждого объекта два поля: `hit_area_unbounded` (его
+`hitArea` может лежать вне его поддерева) и `unbounded_hit_areas` (сколько таких
+владельцев в поддереве, включая его самого). Присваивание `hitArea` классифицирует
+значение: потомок или `null` оставляют клип обычным, чужой клип, геттер или путь, который
+пока не резолвится, помечают его и поднимают счётчик у всех предков; при смене родителя
+счётчик поддерева переезжает вместе с ним. Поддерево не обрезается, пока счётчик больше
+нуля, то есть только на путях к таким владельцам. `hitArea`, заданный на прототипе,
+выключает обрезку целиком. Шарарам делает `pers.hitArea = pers["hit_zone"]` (потомок),
+так что обрезка у него работает везде. Все пять апстримных тестов `hitarea_*` зелёные,
+есть юнит-тест на владельца внутри контейнера, чьи bounds не содержат hit-область;
+цифры бенчмарка те же.
+
+---
+
+## 8. AVM1 `MovieClip.forceSmoothing` — [`ea4c4c019`](https://github.com/sadfun/ruffle/commit/ea4c4c019), [`a4aa03b64`](https://github.com/sadfun/ruffle/commit/a4aa03b64)
+
+### Как это работает в апстриме
+
+Никак: свойства нет (в трекере апстрима оно числится нереализованным,
+[ruffle-rs/ruffle#263](https://github.com/ruffle-rs/ruffle/issues/263)). Присваивание
+создаёт обычную переменную, картинка из `loadMovie` и несглаженные битмап-заливки
+рисуются ближайшим соседом. Клиент Шарарама ставит `forceSmoothing = true` в сотне мест:
+аватарки друзей из VK, иконки эмоций, заданий, подарков. В его ассетах около 2700
+несглаженных битмап-заливок в 1280 SWF.
+
+### Что сделано
+
+Поведение снято с настоящего Flash Player 23 (Pepper-плагин из легаси-лаунчера
+Шарарама), пробниками на каждый случай:
+
+- это флаг клипа. Пока он стоит, сглаживаются загруженная в клип картинка и
+  битмап-заливки шейпов, лежащих **прямо в этом клипе**, загруженный он или обычный;
+  шейпы, появившиеся на более поздних кадрах, тоже;
+- шейпы вложенных клипов, рисование через drawing API и битмапы из `attachBitmap` не
+  затрагиваются;
+- любая загрузка в клип флаг сбрасывает, поэтому выставленное до загрузки теряется;
+- читается свойство всегда как `undefined`, что бы в него ни записали;
+- на `_quality = "LOW"` Flash не сглаживает битмапы вообще.
+
+В Ruffle: нативный аксессор в таблице прототипа `MovieClip` между `blendMode` и
+`scale9Grid` (место и атрибуты `DONT_DELETE | DONT_ENUM` взяты из эталонных выводов Flash
+в тестах апстрима). Флаг `DisplayObjectFlags::FORCE_SMOOTHING` лежит рядом с `LOCK_ROOT`,
+поэтому существующий `reset_for_movie_load` сбрасывает его при загрузке. Сеттер, кроме
+флага, включает `Bitmap::smoothing` у битмапа на глубине 1, куда загрузчик кладёт
+картинку. `Graphic::render_self` при флаге у родителя рисует `GraphicShared::smoothed()`:
+лениво созданную копию шейпа со сглаженными заливками. Она делается только для шейпов,
+которым есть что сглаживать, и общая для всех экземпляров персонажа.
+
+### Проверка
+
+Два теста, `avm1/movieclip_force_smoothing` и `avm1/movieclip_force_smoothing_shapes`:
+эталонные картинки — скриншоты Flash Player 23, трейсы сняты двойником скрипта через
+`ExternalInterface` (релизный плагин `trace` не пишет). Ruffle расходится со скриншотами
+максимум на 4 уровня на канал. Первый коммит с тестом самодостаточен и оформлен в стиле
+апстрима; ветка для PR поверх `upstream/master` —
+[`avm1-force-smoothing`](https://github.com/sadfun/ruffle/tree/avm1-force-smoothing).
+
+Не сделано: Ruffle сглаживает битмапы и на `LOW`, где Flash этого не делает; это общее
+поведение рендера, а не этого свойства.
 
 ---
 
@@ -477,6 +558,8 @@ objects, глубина 10): тик 38 мс, из них pick 15 мс; собы�
 ```sh
 git clone -b shararam/perf https://github.com/sadfun/ruffle && cd ruffle
 cargo test -p ruffle_core --lib library::tests                     # п.5: библиотека выгруженного фильма
+cargo test -p ruffle_core --lib handlers::tests                    # п.7: hitArea вне bounds контейнера
+cargo test -p tests --release --features imgtests --test tests -- avm1/movieclip_force_smoothing  # п.8
 cargo test -p tests --release --features ruffle_core/pick_bounds_verify  # п.7: весь набор SWF + сверка кэша bounds
 cargo test -p ruffle_render --lib                                  # п.1: backdrop independence, append
 cargo test -p ruffle_render_wgpu --lib blend_region                # п.2: регион бленда
@@ -485,9 +568,14 @@ for f in blend mask filter cache load mcl_ movieclip_lockroot; do  # 155 image +
 done
 ```
 
-Всё зелёное на `7826b1412`. Падения, которые есть и на нетронутом дереве этого
-апстримного среза, к нашим изменениям не относятся: три AMF-теста сериализации
-массивов, `from_gnash/attachImported` и два `visual/edittext_*`.
+На `22f6c2ab5` весь набор с `--features imgtests` — 4530 зелёных и 8 падений. Три из
+них наши намеренные: RTMP-коммит всегда сериализует массивы как ECMA-массивы
+(`avm1/amf_array_serialization`, `avm1/amf_strict_array_serialization`,
+`avm1/netconnection_serialize_arrays`). Пять падают и на нетронутом v0.6.0 на этой
+машине: `avm2/pixelbender_dithering`, `fonts/embed_matching/fallback_preferences`,
+`from_shumway/acid/acid-text-5` и два `visual/edittext/*`. `getTimer_test` апстрима
+нестабилен сам по себе (меряет реальные часы), `avm2/stage3d_bitmap` иногда падает под
+нагрузкой и проходит отдельно.
 
 Бандл клиента: `cd web && npm run build --workspace=ruffle-core && npm run build
 --workspace=ruffle-selfhosted` (release + wasm-opt, без дополнительных cargo-фич).
